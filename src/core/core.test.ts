@@ -1,0 +1,493 @@
+import { describe, expect, it, vi } from 'vitest'
+import { DEFAULT_NOTEPAD_TEXT } from './defaultNotepad'
+
+const TEST_VERTEX_KEY = 'AQ.TestVertexExpressDummyKey0000'
+import {
+  exportNotepad,
+  hasUnrecognizedWorkoutText,
+  parseEntryLine,
+  parseNotepad,
+} from './parser'
+import { buildDdpSessionPlan, computeExerciseDdpPlan, getRecommendedSection } from './ddp'
+import {
+  analyzeStatsWithGemini,
+  buildEndpointUrl,
+  detectApiProvider,
+  GEMINI_MODEL,
+  GEMINI_THINKING_LEVEL,
+  generateGeminiSessionPlan,
+  parseWorkoutTextWithGemini,
+} from './gemini'
+import {
+  computeSetRestDuration,
+  formatMinutesAndSecondsFr,
+  getOptimalExtraRestSeconds,
+} from './restScience'
+import {
+  buildEnrichedChronology,
+  computeSmartExerciseInsight,
+  getLatestBestSetSummary,
+} from './statsEngine'
+
+describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
+  const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+
+  it('conserve le préambule DDP intact', () => {
+    expect(parsed.preamble).toContain('RÈGLE SCIENTIFIQUE DE CHARGE')
+    expect(parsed.preamble).toContain('Je mesure 1m84 pour 72kg')
+  })
+
+  it('extrait tous les exercices Up et Jambes sans perte', () => {
+    const upActive = parsed.exercises.filter((e) => e.section === 'up' && e.active)
+    const legsActive = parsed.exercises.filter((e) => e.section === 'legs' && e.active)
+
+    expect(upActive.map((e) => e.name)).toEqual([
+      'Développé incliné haltères',
+      'Tirage vertical',
+      'Chest press (machine)',
+      'Tirage horizontal (poulie basse)',
+      'Élévations latérales aux haltères',
+      'Extensions Triceps à la poulie haute avec corde',
+      'Curl Biceps Incliné aux haltères',
+    ])
+
+    expect(legsActive.map((e) => e.name)).toEqual([
+      'Leg press',
+      'Soulevé de Terre Roumain',
+      'Leg extension',
+      'Leg curl',
+      'Machine assis (mollets)',
+      'Total abdominaux (machine assis crunch vers le bas)',
+    ])
+
+    // Exercice entre parenthèses mis en pause
+    const shoulder = parsed.exercises.find((e) => e.name === 'Shoulder press')
+    expect(shoulder).toBeDefined()
+    expect(shoulder?.archived).toBe(true)
+    expect(shoulder?.active).toBe(false)
+    expect(shoulder?.entries.length).toBe(8)
+  })
+
+  it('gère les cas complexes de lignes réelles (pipes, échec, demi-reps, parenthèses non fermées, multi-lignes)', () => {
+    const devIncline = parsed.exercises.find((e) => e.name === 'Développé incliné haltères')!
+    const latest = devIncline.entries[0]
+    expect(latest.date).toBe('2026-10-22')
+    expect(latest.restSeconds).toBe(150)
+    expect(latest.sets).toEqual([
+      { weight: 10, reps: 12, isWarmup: true },
+      { weight: 22, reps: 10 },
+      { weight: 20, reps: 12 },
+      { weight: 20, reps: 8, failure: true },
+    ])
+
+    // Ligne coupée sur 2 lignes dans Tirage horizontal (08/10/2026)
+    const tirageH = parsed.exercises.find((e) => e.name === 'Tirage horizontal (poulie basse)')!
+    const oct08 = tirageH.entries.find((e) => e.date === '2026-10-08')!
+    expect(oct08.sets.map((s) => `${s.weight}x${s.reps}`)).toEqual(['45x11', '45x9', '45x9'])
+    expect(oct08.restSeconds).toBe(150)
+    expect(oct08.note).toContain('Compliqué')
+
+    // Demi-répétition 11.5 sur Extensions Triceps
+    const triceps = parsed.exercises.find(
+      (e) => e.name === 'Extensions Triceps à la poulie haute avec corde',
+    )!
+    expect(triceps.entries[0].sets[0]).toEqual({ weight: 15, reps: 11.5 })
+
+    // `10kg (1 main par 1 main) 13` sans signe `x`
+    const curl = parsed.exercises.find((e) => e.name === 'Curl Biceps Incliné aux haltères')!
+    expect(curl.entries[0].sets.map((s) => `${s.weight}x${s.reps}`)).toEqual([
+      '10x15',
+      '10x10',
+      '10x13',
+    ])
+
+    // Parenthèse non fermée avant `, 15 13` sur Mollets 12/10/2026
+    const mollets = parsed.exercises.find((e) => e.name === 'Machine assis (mollets)')!
+    const molletsOct12 = mollets.entries.find((e) => e.date === '2026-10-12')!
+    expect(molletsOct12.sets.map((s) => `${s.weight}x${s.reps}`)).toEqual([
+      '20x15',
+      '30x13',
+      '30x15',
+      '30x13',
+    ])
+
+    // Parenthèse fautive `?(, 8` sur Leg extension
+    const fixedTypo = parseEntryLine(
+      '• 55kg x 12, 8 (j’ai respiré trop vite peut être j’allais faire un malaise, 2minutes trop peu?(, 8',
+    )
+    expect(fixedTypo.sets.map((s) => `${s.weight}x${s.reps}`)).toEqual(['55x12', '55x8', '55x8'])
+
+    // `(échauffement)` explicite entre parenthèses sur la première séance de Leg press
+    const legPress = parsed.exercises.find((e) => e.name === 'Leg press')!
+    const oldestLegPress = legPress.entries[legPress.entries.length - 1]
+    expect(oldestLegPress.sets[0]).toEqual({ weight: 50, reps: 12, isWarmup: true })
+    expect(oldestLegPress.note).toBe('')
+  })
+
+  it('recommande JAMBES quand la dernière date enregistrée est Up (22/10 vs 21/10)', () => {
+    const skips = parsed.exercises.flatMap((ex) =>
+      ex.entries.filter((e) => e.skipOnly).map((e) => `${ex.name}: ${e.note}`),
+    )
+    expect(skips.length).toBe(5)
+
+    const rec = getRecommendedSection(parsed.exercises)
+    expect(rec.upLastDate).toBe('2026-10-22')
+    expect(rec.legsLastDate).toBe('2026-10-21')
+    expect(rec.recommended).toBe('legs')
+  })
+
+  it('applique la règle DDP série par série', () => {
+    const rdl = parsed.exercises.find((e) => e.name === 'Soulevé de Terre Roumain')!
+    // Dernière séance 21/10 : 22kg x 12 | 20kg x 12, 12 -> S1 passe à 24kg x 8-10, S2/S3 à 22kg x 8-10
+    const rdlPlan = computeExerciseDdpPlan(rdl)
+    expect(rdlPlan.sets[0]).toMatchObject({ weight: 24, repsMin: 8, repsMax: 10 })
+    expect(rdlPlan.sets[1]).toMatchObject({ weight: 22, repsMin: 8, repsMax: 10 })
+
+    const abdos = parsed.exercises.find((e) => e.name.startsWith('Total abdominaux'))!
+    // Dernière séance 21/10 : 55kg x 13 | 50kg x 15, 13 (iso 12-15) -> S1 reste à 55kg x 14
+    const abdosPlan = computeExerciseDdpPlan(abdos)
+    expect(abdosPlan.sets[0]).toMatchObject({ weight: 55, repsMin: 14, repsMax: 14 })
+  })
+
+  it('exporte un bloc-notes complet avec les nouveaux (Objectif) en haut de la séance prévue', () => {
+    const plan = buildDdpSessionPlan(parsed.exercises, 'legs')
+    const exported = exportNotepad({
+      preamble: parsed.preamble,
+      exercises: parsed.exercises,
+      plan,
+      planDateIso: '2026-10-23',
+      includeObjectives: true,
+    })
+
+    expect(exported).toContain('Soulevé de Terre Roumain :\n• 23/10/2026 (Objectif) : 24kg x 8-10')
+    // Les anciens (Objectif) sur les séances déjà réalisées ont été nettoyés
+    expect(exported).not.toContain('22/10/2026 (Objectif)')
+    expect(exported).toContain('• 22/10/2026 : 10kg x 12 | 22kg x 10 | 20kg x 12, 8 (échec)')
+  })
+})
+
+describe('Client Gemini 3.8 Flash High & détection clé AQ. Vertex AI Express vs AIza', () => {
+  it('utilise strictement gemini-3.8-flash en thinking HIGH', () => {
+    expect(GEMINI_MODEL).toBe('gemini-3.8-flash')
+    expect(GEMINI_THINKING_LEVEL).toBe('HIGH')
+    expect(detectApiProvider(TEST_VERTEX_KEY).kind).toBe('vertex_express')
+    expect(buildEndpointUrl(TEST_VERTEX_KEY)).toBe(
+      'https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:generateContent',
+    )
+  })
+
+  it('détecte une clé AI Studio classique AIza sur gemini-3.8-flash', () => {
+    expect(detectApiProvider('AIzaSyExampleKey123').kind).toBe('ai_studio')
+    expect(buildEndpointUrl('AIzaSyExampleKey123')).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
+    )
+  })
+
+  it('parse une réponse structurée Gemini 3.8 Flash High et complète avec le fallback DDP si besoin', async () => {
+    const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { thought: true, text: 'Réflexion interne...' },
+                {
+                  text: JSON.stringify({
+                    summary_lines: ['Super dernière séance jambes, on monte sur le RDL.'],
+                    exercises: [
+                      {
+                        exercise_id: 'ex-souleve-de-terre-roumain',
+                        rest_seconds: 150,
+                        tip: 'Garde le dos neutre et pousse les hanches.',
+                        sets: [
+                          { weight: 24, reps_min: 8, reps_max: 10, is_warmup: false },
+                          { weight: 22, reps_min: 8, reps_max: 10, is_warmup: false },
+                          { weight: 22, reps_min: 8, reps_max: 10, is_warmup: false },
+                        ],
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const plan = await generateGeminiSessionPlan({
+      section: 'legs',
+      exercises: parsed.exercises,
+      settings: {
+        apiKey: TEST_VERTEX_KEY,
+        profileHeightCm: 184,
+        profileWeightKg: 72,
+      },
+    })
+
+    expect(plan.source).toBe('gemini')
+    expect(plan.model).toBe('gemini-3.8-flash')
+    expect(plan.exercises['ex-souleve-de-terre-roumain'].sets[0].weight).toBe(24)
+    expect(plan.exercises['ex-leg-press']).toBeDefined()
+
+    // Vérifie que la requête envoie bien thinkingLevel: "HIGH" sur gemini-3.8-flash et les commentaires
+    const [calledUrl, calledInit] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect(calledUrl).toContain('gemini-3.8-flash:generateContent')
+    const sentBody = JSON.parse(calledInit.body as string)
+    expect(sentBody.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH' })
+    expect(sentBody.contents[0].parts[0].text).toContain('user_comment')
+  })
+
+  it('bascule automatiquement sur thinkingBudget: 16384 sur gemini-3.8-flash si un endpoint rejette thinkingLevel', async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: { message: 'Invalid value at generation_config.thinking_config.thinking_level' },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      headline: 'OK avec thinkingBudget high.',
+                      bullet_points: [],
+                      exercises: [],
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    const stats = await analyzeStatsWithGemini({
+      exercises: parsed.exercises,
+      apiKey: TEST_VERTEX_KEY,
+    })
+
+    expect(stats.headline).toBe('OK avec thinkingBudget high.')
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+    const [secondUrl, secondInit] = mockFetch.mock.calls[1] as [string, RequestInit]
+    expect(secondUrl).toContain('gemini-3.8-flash:generateContent')
+    const secondBody = JSON.parse(secondInit.body as string)
+    expect(secondBody.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 16384 })
+  })
+
+  it('détecte un texte libre non reconnu et extrait les exercices/séries via Gemini 3.8 Flash High', async () => {
+    const standardParsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    expect(hasUnrecognizedWorkoutText(DEFAULT_NOTEPAD_TEXT, standardParsed)).toBe(false)
+
+    const freeformText = `Séance haut hier soir :
+J'ai fait 3 séries de développé couché haltères à 26 kilos pour 10, 9 et 8 répétitions (échec sur la dernière).
+Ensuite tirage vertical 55 kilos 12 reps puis 10 reps.`
+    const freeformParsed = parseNotepad(freeformText)
+    expect(hasUnrecognizedWorkoutText(freeformText, freeformParsed)).toBe(true)
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    exercises: [
+                      {
+                        name: 'Développé couché haltères',
+                        section: 'up',
+                        active: true,
+                        entries: [
+                          {
+                            date_iso: '2026-10-21',
+                            rest_seconds: 150,
+                            note: 'Séance soir',
+                            sets: [
+                              { weight: 26, reps: 10, is_warmup: false, failure: false },
+                              { weight: 26, reps: 9, is_warmup: false, failure: false },
+                              { weight: 26, reps: 8, is_warmup: false, failure: true },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const extracted = await parseWorkoutTextWithGemini({
+      rawText: freeformText,
+      apiKey: TEST_VERTEX_KEY,
+    })
+
+    expect(extracted).toHaveLength(1)
+    expect(extracted[0].name).toBe('Développé couché haltères')
+    expect(extracted[0].entries[0].sets[2]).toEqual({
+      weight: 26,
+      reps: 8,
+      failure: true,
+    })
+  })
+})
+
+describe('Temps de repos scientifiques hypertrophie (restScience)', () => {
+  it('adapte les ajouts optimaux selon échauffement / isolation / polyarticulaire / échec', () => {
+    expect(
+      getOptimalExtraRestSeconds({ category: 'poly', isWarmup: true, failure: false }),
+    ).toBe(15)
+    expect(
+      getOptimalExtraRestSeconds({ category: 'iso', isWarmup: false, failure: false }),
+    ).toBe(20)
+    expect(
+      getOptimalExtraRestSeconds({ category: 'iso', isWarmup: false, failure: true }),
+    ).toBe(30)
+    expect(
+      getOptimalExtraRestSeconds({ category: 'poly', isWarmup: false, failure: false }),
+    ).toBe(30)
+    expect(
+      getOptimalExtraRestSeconds({ category: 'poly', isWarmup: false, failure: true }),
+    ).toBe(45)
+
+    expect(
+      computeSetRestDuration({
+        baseRestSeconds: 150,
+        category: 'poly',
+        isWarmup: true,
+        failure: false,
+      }),
+    ).toBe(60)
+
+    expect(formatMinutesAndSecondsFr(154)).toBe('2 min 34 s')
+  })
+
+  it('conserve 100% des durées (repos, exo, séance) à l’export/import du bloc-notes', () => {
+    const line =
+      '• 22/10/2026 : 50kg x 10 (super séance) (repos : 2min30) (exo : 1min15) (séance : 48min20)'
+    const entry = parseEntryLine(line)
+    expect(entry.restSeconds).toBe(150)
+    expect(entry.workSeconds).toBe(75)
+    expect(entry.sessionDurationSeconds).toBe(2900)
+    expect(entry.note).toBe('super séance')
+  })
+
+  it('analyse les statistiques via Gemini 3.8 Flash High sans pourcentages absurdes', async () => {
+    const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    headline: 'Progression régulière sur les 4 dernières semaines.',
+                    bullet_points: [
+                      'Hausse propre sur le développé incliné (+2 kg).',
+                      'Changement de machine pris en compte sur les jambes.',
+                    ],
+                    exercises: [
+                      {
+                        exercise_id: 'ex-leg-press',
+                        badge: 'Nouvelle machine',
+                        status: 'recalibration',
+                        summary: 'Changement de presse détecté, repère actuel à 130 kg.',
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const stats = await analyzeStatsWithGemini({
+      exercises: parsed.exercises,
+      apiKey: TEST_VERTEX_KEY,
+    })
+
+    expect(stats.model).toBe('gemini-3.8-flash')
+    expect(stats.headline).toContain('Progression régulière')
+    expect(stats.exercises['ex-leg-press'].badge).toBe('Nouvelle machine')
+  })
+
+  it('distingue proprement les variantes de machines et ignore les oublis de poids 0kg dans statsEngine', () => {
+    const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    const curl = parsed.exercises.find((e) => e.name === 'Curl Biceps Incliné aux haltères')!
+    const curlChrono = buildEnrichedChronology(curl)
+
+    // La séance #5 (0kg x 10, 8, 5) est marquée invalide en poids et affichée "? kg × 10, 8, 5"
+    const zeroEntry = curlChrono.find((c) => !c.hasValidWeight)!
+    expect(zeroEntry).toBeDefined()
+    expect(zeroEntry.setsDisplay).toBe('? kg × 10, 8, 5')
+
+    // Les séances poulie sont bien taguées et séparées des haltères ("Standard")
+    expect(curlChrono.some((c) => c.variant === 'Poulie basse')).toBe(true)
+    expect(curlChrono.some((c) => c.variant === 'Poulie haute')).toBe(true)
+
+    const curlInsight = computeSmartExerciseInsight(curl)
+    expect(curlInsight.status).toBe('progressing')
+    expect(curlInsight.badge).toBe('+1 rep à 10 kg')
+
+    // Leg press : passage de "Par côté" (42,5 kg) à "Presse poids dos" (100 kg) -> recalibration et non +135%
+    const legPress = parsed.exercises.find((e) => e.name === 'Leg press')!
+    const lpInsight = computeSmartExerciseInsight(legPress)
+    expect(lpInsight.status).toBe('recalibration')
+    expect(lpInsight.badge).toContain('Presse poids dos')
+
+    // Virgule française sur les demi-répétitions (Extensions Triceps : 15 kg × 11,5)
+    const triceps = parsed.exercises.find((e) =>
+      e.name.startsWith('Extensions Triceps'),
+    )!
+    expect(getLatestBestSetSummary(triceps)).toBe('15 kg × 11,5')
+  })
+
+  it('garantit un aller-retour export/import 100% idempotent sans perte sur les 762 séries (y compris demi-reps)', () => {
+    const parsed1 = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    const exported1 = exportNotepad({
+      preamble: parsed1.preamble,
+      exercises: parsed1.exercises,
+    })
+    const parsed2 = parseNotepad(exported1)
+    const exported2 = exportNotepad({
+      preamble: parsed2.preamble,
+      exercises: parsed2.exercises,
+    })
+
+    const countSets = (exs: typeof parsed1.exercises) =>
+      exs.reduce(
+        (acc, ex) => acc + ex.entries.reduce((s, entry) => s + entry.sets.length, 0),
+        0,
+      )
+
+    expect(countSets(parsed2.exercises)).toBe(countSets(parsed1.exercises))
+    expect(exported2).toBe(exported1)
+  })
+})
