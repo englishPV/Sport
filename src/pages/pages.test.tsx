@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import ImportReviewPage from './ImportReviewPage'
@@ -62,6 +62,60 @@ describe('parcours complet', () => {
     expect(await screen.findByRole('heading', { name: 'GymLog' })).toBeTruthy()
     expect(useAppStore.getState().onboardingDone).toBe(true)
     expect(screen.getByRole('heading', { name: 'Séance A' })).toBeTruthy()
+  })
+})
+
+describe('séance complète', () => {
+  it('lance, valide les séries, gère le repos et termine', async () => {
+    const user = userEvent.setup()
+    const store = useAppStore.getState()
+    const exerciseId = store.ensureExercise({ name: 'Développé couché' })
+    const typeId = store.createSessionType('HAUT', [exerciseId])
+    const sessionId = store.createOrReuseSession(typeId)
+    if (sessionId === null) throw new Error('session non créée')
+    await useAppStore.getState().ensureCoachPlan(sessionId)
+    useAppStore.getState().setOnboardingDone(true)
+
+    window.location.hash = `#/session/${sessionId}`
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: /Lancer la séance/ }))
+    expect(await screen.findByText(/Série 1 \/ 3/)).toBeTruthy()
+    expect(screen.getByText(/Cible :/)).toBeTruthy()
+
+    const repsInput = screen.getByLabelText('Répétitions de la série')
+    fireEvent.change(repsInput, { target: { value: '10' } })
+    fireEvent.change(screen.getByLabelText('Poids de la série'), { target: { value: '50' } })
+    await user.click(screen.getByRole('button', { name: 'Valider la série' }))
+
+    let state = useAppStore.getState()
+    const session = state.sessions.find((candidate) => candidate.id === sessionId)
+    expect(session?.exercises[0].sets[0].completedAt).not.toBeNull()
+    expect(session?.exercises[0].sets[0].reps).toBe(10)
+    expect(state.restTimer).not.toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Passer le repos' }))
+    expect(useAppStore.getState().restTimer).toBeNull()
+
+    for (let index = 0; index < 2; index += 1) {
+      fireEvent.change(screen.getByLabelText('Répétitions de la série'), {
+        target: { value: '9' },
+      })
+      await user.click(screen.getByRole('button', { name: 'Valider la série' }))
+    }
+
+    expect(await screen.findByText('Toutes les séries sont validées')).toBeTruthy()
+    await waitFor(() => {
+      expect(useAppStore.getState().sessions[0].exercises[0].sets).toHaveLength(3)
+    })
+
+    await user.click(screen.getByRole('button', { name: /Terminer la séance/ }))
+    expect(await screen.findByRole('heading', { name: 'Séance terminée' })).toBeTruthy()
+
+    state = useAppStore.getState()
+    expect(state.sessions.find((candidate) => candidate.id === sessionId)?.status).toBe('completed')
+    expect(state.activeSessionId).toBeNull()
+    window.location.hash = ''
   })
 })
 

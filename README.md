@@ -15,7 +15,7 @@ vite-plugin-pwa (generateSW, autoUpdate) · lucide-react.
 ```bash
 npm install
 npm run dev       # http://localhost:5173
-npm run test      # vitest (84 tests)
+npm run test      # vitest (85 tests)
 npm run lint      # eslint
 npm run build     # tsc + vite build → dist/
 npm run preview   # sert dist/ localement
