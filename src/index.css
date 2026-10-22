@@ -5,6 +5,23 @@
 @layer base {
   html {
     -webkit-tap-highlight-color: transparent;
+    scroll-behavior: smooth;
+  }
+
+  /* Le passage clair / sombre ne « flash » plus : les couleurs fondent doucement. */
+  body {
+    transition:
+      background-color 320ms cubic-bezier(0.22, 1, 0.36, 1),
+      color 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+    transition-duration: 180ms;
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   input[type='number']::-webkit-inner-spin-button,
@@ -14,5 +31,50 @@
   }
   input[type='number'] {
     -moz-appearance: textfield;
+  }
+
+  ::selection {
+    background-color: rgb(79 70 229 / 0.18);
+  }
+
+  /* Navigation clavier visible et cohérente (sans casser les inputs). */
+  :where(button, a, [role='tab']):focus-visible {
+    outline: 2px solid rgb(99 102 241 / 0.65);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Petit retour tactile commun à tous les boutons « icône » */
+  .tap {
+    @apply transition duration-200 ease-smooth active:scale-90;
+  }
+
+  /* Léger enfoncement des boutons pleine largeur */
+  .press {
+    @apply transition duration-200 ease-smooth active:scale-[0.97];
+  }
+}
+
+/* Bascule clair / sombre : on laisse les couleurs se fondre ~300 ms. */
+html.theme-changing,
+html.theme-changing *,
+html.theme-changing *::before,
+html.theme-changing *::after {
+  transition-property: background-color, border-color, color, fill, stroke, box-shadow !important;
+  transition-duration: 300ms !important;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+
+/* Respecte le réglage système « réduire les animations ». */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

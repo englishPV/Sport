@@ -100,7 +100,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
           type="button"
           onClick={onBack}
           aria-label="Retour"
-          className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
+          className="tap flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
         >
           <ArrowLeft size={20} />
         </button>
@@ -113,7 +113,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
           <button
             type="button"
             onClick={handleCopy}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white dark:bg-white dark:text-slate-900"
+            className="press inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100"
           >
             <Copy className="h-3.5 w-3.5" />
             Copier
@@ -122,7 +122,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
           <button
             type="button"
             onClick={handleDownload}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+            className="press inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-800"
           >
             <Download className="h-3.5 w-3.5" />
             .txt
@@ -143,7 +143,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
             type="button"
             disabled={aiLoading}
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+            className="press inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-800"
           >
             <Upload className="h-3.5 w-3.5" />
             Fichier
@@ -157,7 +157,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
             setEditorText(null)
             flash('Réinitialisé')
           }}
-          className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-rose-500"
+          className="tap inline-flex items-center gap-1 text-xs text-slate-400 hover:text-rose-500"
         >
           <RotateCcw className="h-3.5 w-3.5" />
           Défaut
@@ -174,14 +174,17 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
       )}
 
       {feedback && (
-        <p className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+        <p
+          key={feedback}
+          className="inline-flex animate-toast-in items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400"
+        >
           <Check className="h-3.5 w-3.5" />
           {feedback}
         </p>
       )}
 
       {errorMsg && (
-        <p className="rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-600 dark:text-rose-300">
+        <p className="animate-toast-in rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-600 dark:text-rose-300">
           {errorMsg}
         </p>
       )}
@@ -192,7 +195,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
         rows={18}
         spellCheck={false}
         placeholder="Colle ton bloc-notes ou même un texte libre de séance : si le format n'est pas reconnu, Gemini 3.8 Flash High extraira automatiquement tes exercices et séries."
-        className="w-full rounded-2xl border border-slate-200 bg-white p-4 font-mono text-xs leading-relaxed text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100"
+        className="w-full rounded-2xl border border-slate-200 bg-white p-4 font-mono text-xs leading-relaxed text-slate-800 focus:border-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-indigo-400/10"
       />
 
       {editorText !== null && (
@@ -200,7 +203,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
           type="button"
           disabled={aiLoading}
           onClick={() => void runSmartImport(editorText)}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-indigo-600 py-3 text-sm font-bold text-white disabled:opacity-60"
+          className="press inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-indigo-600 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-600/20 hover:bg-indigo-500 disabled:opacity-60 disabled:shadow-none"
         >
           {aiLoading ? (
             <>

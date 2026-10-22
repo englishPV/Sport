@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, ChevronDown } from 'lucide-react'
+import { Collapse } from '../components/motion'
 import { ProgressionChart, type ChartMetric } from '../components/ProgressionChart'
 import { buildStatsFingerprint } from '../core/gemini'
 import {
@@ -179,7 +180,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
             type="button"
             onClick={onBack}
             aria-label="Retour"
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
+            className="tap flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
           >
             <ArrowLeft size={20} />
           </button>
@@ -209,7 +210,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                 Analyse IA…
               </span>
             ) : freshAiStats ? (
-              <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">
+              <span className="animate-pop-in rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">
                 IA 3.8 High
               </span>
             ) : null}
@@ -220,14 +221,17 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
               type="button"
               disabled={aiStatsLoading}
               onClick={() => void refreshAiStats(true)}
-              className="text-xs font-semibold text-slate-400 transition hover:text-indigo-600 disabled:opacity-40 dark:hover:text-indigo-400"
+              className="tap text-xs font-semibold text-slate-400 hover:text-indigo-600 disabled:opacity-40 dark:hover:text-indigo-400"
             >
               Actualiser
             </button>
           ) : null}
         </div>
 
-        <p className="mt-2 text-sm font-medium text-slate-700 dark:text-slate-200">
+        <p
+          key={freshAiStats ? 'ai' : 'local'}
+          className="mt-2 animate-fade-in text-sm font-medium text-slate-700 dark:text-slate-200"
+        >
           {freshAiStats ? freshAiStats.headline : localSynthesis.headline}
         </p>
 
@@ -258,17 +262,25 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
           <div className="mt-3 border-t border-slate-100 pt-2.5 dark:border-slate-800">
             <button
               type="button"
+              aria-expanded={showRecentTimings}
               onClick={() => setShowRecentTimings((v) => !v)}
-              className="flex w-full items-center justify-between text-xs font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+              className="flex w-full items-center justify-between rounded-lg text-xs font-semibold text-slate-500 transition-colors duration-200 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
             >
               <span>
                 Chronos suivis en direct ({completedSessions.length})
               </span>
-              <span>{showRecentTimings ? 'Masquer' : 'Voir'}</span>
+              <span className="inline-flex items-center gap-1">
+                {showRecentTimings ? 'Masquer' : 'Voir'}
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform duration-300 ease-smooth ${
+                    showRecentTimings ? 'rotate-180' : ''
+                  }`}
+                />
+              </span>
             </button>
 
-            {showRecentTimings && (
-              <div className="mt-2 space-y-1.5">
+            <Collapse open={showRecentTimings} className="mt-2">
+              <div className="space-y-1.5">
                 {completedSessions.slice(0, 5).map((sess) => (
                   <div
                     key={sess.id}
@@ -291,7 +303,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                         type="button"
                         onClick={() => deleteCompletedSession(sess.id)}
                         title="Supprimer ce chrono"
-                        className="ml-1 rounded px-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40"
+                        className="ml-1 rounded px-1 text-slate-400 transition-all duration-200 hover:bg-rose-50 hover:text-rose-600 active:scale-90 dark:hover:bg-rose-950/40"
                       >
                         ×
                       </button>
@@ -299,17 +311,23 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                   </div>
                 ))}
               </div>
-            )}
+            </Collapse>
           </div>
         ) : null}
       </section>
 
-      {/* Sélecteur Haut / Jambes */}
+      {/* Sélecteur Haut / Jambes — la pastille active glisse d'un onglet à l'autre */}
       <div
         role="tablist"
         aria-label="Séance analysée"
-        className="grid grid-cols-2 gap-1.5 rounded-2xl bg-slate-200/70 p-1 dark:bg-slate-900"
+        className="relative grid grid-cols-2 rounded-2xl bg-slate-200/70 p-1 dark:bg-slate-900"
       >
+        <span
+          aria-hidden="true"
+          className={`pointer-events-none absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded-xl bg-white shadow-sm transition-transform duration-300 ease-smooth dark:bg-slate-800 ${
+            section === 'legs' ? 'translate-x-full' : 'translate-x-0'
+          }`}
+        />
         {(['up', 'legs'] as SectionId[]).map((sec) => {
           const active = section === sec
           return (
@@ -323,9 +341,9 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                 setExpandedExId(null)
                 setShowHistoryExId(null)
               }}
-              className={`rounded-xl py-2.5 text-sm font-bold transition ${
+              className={`relative z-10 rounded-xl py-2.5 text-sm font-bold transition-all duration-300 ease-smooth active:scale-[0.98] ${
                 active
-                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-800 dark:text-white'
+                  ? 'text-slate-900 dark:text-white'
                   : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
               }`}
             >
@@ -336,8 +354,8 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
       </div>
 
       {/* Liste épurée : un clic sur un exercice ouvre sa courbe et son détail */}
-      <div className="space-y-2">
-        {sectionExercises.map((ex) => {
+      <div key={section} className="space-y-2">
+        {sectionExercises.map((ex, idx) => {
           const isOpen = expandedExId === ex.id
           const showHistory = showHistoryExId === ex.id
           const insight: AiExerciseStatInsight =
@@ -353,10 +371,11 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
           return (
             <div
               key={ex.id}
-              className={`overflow-hidden rounded-2xl border bg-white transition dark:bg-slate-900 ${
+              style={{ animationDelay: `${Math.min(idx * 35, 210)}ms` }}
+              className={`animate-fade-up overflow-hidden rounded-2xl border bg-white transition-[border-color,box-shadow] duration-300 ease-smooth dark:bg-slate-900 ${
                 isOpen
                   ? 'border-indigo-300 shadow-md dark:border-indigo-500/50'
-                  : 'border-slate-200/80 shadow-sm dark:border-slate-800'
+                  : 'border-slate-200/80 shadow-sm hover:border-slate-300 hover:shadow dark:border-slate-800 dark:hover:border-slate-700'
               }`}
             >
               {/* Ligne épurée cliquable */}
@@ -366,7 +385,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                   setExpandedExId(isOpen ? null : ex.id)
                   setShowHistoryExId(null)
                 }}
-                className="flex w-full items-center justify-between gap-3 px-4 py-3.5 text-left"
+                className="flex w-full items-center justify-between gap-3 px-4 py-3.5 text-left transition-colors duration-200 hover:bg-slate-50/70 dark:hover:bg-slate-800/30"
               >
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-bold text-slate-900 dark:text-white">
@@ -385,18 +404,16 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                   >
                     {insight.badge}
                   </span>
-                  <span
-                    className={`text-xs text-slate-400 transition-transform ${
+                  <ChevronDown
+                    className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-300 ease-smooth ${
                       isOpen ? 'rotate-180' : ''
                     }`}
-                  >
-                    ▾
-                  </span>
+                  />
                 </div>
               </button>
 
               {/* Détail progressif uniquement quand l'utilisateur clique */}
-              {isOpen && (
+              <Collapse open={isOpen}>
                 <div className="space-y-3.5 border-t border-slate-100 px-4 pb-4 pt-3 dark:border-slate-800">
                   {insight.summary ? (
                     <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600 dark:bg-slate-800/70 dark:text-slate-300">
@@ -409,7 +426,17 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                     <span className="text-xs font-semibold text-slate-400">
                       {SECTION_LABELS[ex.section].short} · {realSessionsCount} séances
                     </span>
-                    <div className="inline-flex gap-0.5 rounded-xl bg-slate-100 p-0.5 text-xs dark:bg-slate-800">
+                    <div className="relative grid grid-cols-3 rounded-xl bg-slate-100 p-0.5 text-xs dark:bg-slate-800">
+                      <span
+                        aria-hidden="true"
+                        className={`pointer-events-none absolute inset-y-0.5 left-0.5 w-[calc((100%_-_0.25rem)/3)] rounded-lg bg-white shadow-sm transition-transform duration-300 ease-smooth dark:bg-slate-900 ${
+                          metric === 'reps'
+                            ? 'translate-x-full'
+                            : metric === 'volume'
+                              ? 'translate-x-[200%]'
+                              : 'translate-x-0'
+                        }`}
+                      />
                       {(
                         [
                           { id: 'maxWeight', label: 'Poids' },
@@ -421,10 +448,10 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                           key={m.id}
                           type="button"
                           onClick={() => setMetric(m.id)}
-                          className={`rounded-lg px-2.5 py-1 font-semibold transition ${
+                          className={`relative z-10 rounded-lg px-2.5 py-1 font-semibold transition-all duration-300 ease-smooth active:scale-95 ${
                             metric === m.id
-                              ? 'bg-white text-indigo-600 shadow-sm dark:bg-slate-900 dark:text-indigo-400'
-                              : 'text-slate-500 dark:text-slate-400'
+                              ? 'text-indigo-600 dark:text-indigo-400'
+                              : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
                           }`}
                         >
                           {m.label}
@@ -440,21 +467,22 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                     <button
                       type="button"
                       onClick={() => setShowHistoryExId(showHistory ? null : ex.id)}
-                      className="text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
+                      className="tap text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
                     >
                       {showHistory
                         ? 'Masquer les séances'
                         : `Voir les ${realSessionsCount} séances`}
                     </button>
 
-                    {showHistory && (
-                      <div className="mt-2.5 max-h-72 space-y-1.5 overflow-y-auto pr-1">
-                        {chronoDesc.map((item) => {
+                    <Collapse open={showHistory} className="mt-2.5">
+                      <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
+                        {chronoDesc.map((item, itemIdx) => {
                           const entry = item.entry
                           return (
                             <div
                               key={entry.id}
-                              className="flex items-start justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
+                              style={{ animationDelay: `${Math.min(itemIdx * 25, 150)}ms` }}
+                              className="flex animate-fade-up items-start justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
                             >
                               <div className="min-w-0 space-y-0.5">
                                 <div className="flex flex-wrap items-center gap-1.5">
@@ -495,7 +523,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                                   type="button"
                                   onClick={() => deleteHistoryEntry(ex.id, entry.id)}
                                   title="Supprimer cette entrée"
-                                  className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40"
+                                  className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 transition-all duration-200 hover:bg-rose-50 hover:text-rose-600 active:scale-90 dark:hover:bg-rose-950/40"
                                 >
                                   ×
                                 </button>
@@ -504,10 +532,10 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                           )
                         })}
                       </div>
-                    )}
+                    </Collapse>
                   </div>
                 </div>
-              )}
+              </Collapse>
             </div>
           )
         })}

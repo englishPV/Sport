@@ -182,10 +182,10 @@ export function ProgressionChart({
               setHoveredIdx(null)
               setPinnedIdx(null)
             }}
-            className={`rounded-full px-2.5 py-0.5 font-semibold transition ${
+            className={`rounded-full px-2.5 py-0.5 font-semibold transition-all duration-300 ease-smooth active:scale-95 ${
               filterSameMachine
-                ? 'bg-indigo-600 text-white'
-                : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25'
+                : 'bg-slate-100 text-slate-500 hover:text-slate-700 dark:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
             }`}
           >
             Même machine ({primaryPoints.length})
@@ -197,10 +197,10 @@ export function ProgressionChart({
               setHoveredIdx(null)
               setPinnedIdx(null)
             }}
-            className={`rounded-full px-2.5 py-0.5 font-semibold transition ${
+            className={`rounded-full px-2.5 py-0.5 font-semibold transition-all duration-300 ease-smooth active:scale-95 ${
               !filterSameMachine
-                ? 'bg-indigo-600 text-white'
-                : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25'
+                : 'bg-slate-100 text-slate-500 hover:text-slate-700 dark:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
             }`}
           >
             Tout ({allPoints.length})
@@ -209,7 +209,7 @@ export function ProgressionChart({
       )}
 
       {/* Détail du point inspecté (revient automatiquement à la dernière séance quand la souris sort) */}
-      <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-xs dark:bg-slate-800/60">
+      <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-xs transition-colors duration-300 dark:bg-slate-800/60">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="font-semibold text-slate-700 dark:text-slate-200">
@@ -255,8 +255,9 @@ export function ProgressionChart({
       </div>
 
       <svg
+        key={metric}
         viewBox={`0 0 ${width} ${height}`}
-        className="h-48 w-full select-none overflow-visible"
+        className="h-48 w-full animate-fade-in select-none overflow-visible"
         role="img"
         aria-label={`Progression ${exercise.name}`}
         onMouseLeave={() => setHoveredIdx(null)}
@@ -294,7 +295,12 @@ export function ProgressionChart({
         })}
 
         {coords.length > 1 && (!hasVariantSwitch || filterSameMachine) ? (
-          <path d={areaPath} fill={`url(#grad-${metric})`} />
+          <path
+            d={areaPath}
+            fill={`url(#grad-${metric})`}
+            className="animate-fade-in"
+            style={{ animationDuration: '600ms' }}
+          />
         ) : null}
 
         {/* Segments : pointillés lorsqu'il y a changement de machine entre 2 séances */}
@@ -313,6 +319,8 @@ export function ProgressionChart({
               strokeWidth={switchedMachine ? 1.75 : 2.75}
               strokeDasharray={switchedMachine ? '4 4' : undefined}
               strokeLinecap="round"
+              className="animate-fade-in"
+              style={{ animationDelay: `${Math.min(idx * 35, 400)}ms` }}
             />
           )
         })}
@@ -325,7 +333,8 @@ export function ProgressionChart({
           return (
             <g
               key={c.idx}
-              className="cursor-pointer"
+              className="animate-fade-in cursor-pointer"
+              style={{ animationDelay: `${Math.min(c.idx * 35, 400)}ms` }}
               onMouseEnter={() => setHoveredIdx(c.idx)}
               onClick={() =>
                 setPinnedIdx((cur) => (cur === c.idx ? null : c.idx))
@@ -353,6 +362,10 @@ export function ProgressionChart({
                       : strokeColor
                 }
                 strokeWidth={2}
+                style={{
+                  transition:
+                    'r 180ms cubic-bezier(0.22, 1, 0.36, 1), fill 180ms ease, stroke 180ms ease',
+                }}
               />
               {showXLabel ? (
                 <text

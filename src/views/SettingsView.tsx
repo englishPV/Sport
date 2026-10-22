@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowLeft, Eye, EyeOff, Trash2, Wifi } from 'lucide-react'
+import { ArrowLeft, Eye, EyeOff, Loader2, Moon, Sun, Trash2, Wifi } from 'lucide-react'
 import { GEMINI_MODEL, GEMINI_THINKING_LEVEL, testGeminiConnection } from '../core/gemini'
 import { useWorkoutStore } from '../store/useWorkoutStore'
 
@@ -30,7 +30,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
           type="button"
           onClick={onBack}
           aria-label="Retour"
-          className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
+          className="tap flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
         >
           <ArrowLeft size={20} />
         </button>
@@ -38,10 +38,10 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
         <div className="w-10" />
       </div>
 
-      <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div className="animate-fade-up space-y-4 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
         <div className="flex items-center justify-between text-xs font-bold">
           <span className="text-slate-500 dark:text-slate-400">Modèle IA</span>
-          <span className="rounded-lg bg-blue-50 px-2.5 py-1 font-mono text-blue-700 dark:bg-blue-950/60 dark:text-blue-300">
+          <span className="rounded-lg bg-blue-50 px-2.5 py-1 font-mono text-blue-700 transition-colors duration-300 dark:bg-blue-950/60 dark:text-blue-300">
             {GEMINI_MODEL} · {GEMINI_THINKING_LEVEL}
           </span>
         </div>
@@ -58,15 +58,17 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
             autoComplete="off"
             spellCheck={false}
             aria-label="Clé API Gemini"
-            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-3.5 pr-10 font-mono text-xs text-slate-900 focus:border-blue-500 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
+            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-3.5 pr-10 font-mono text-xs text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-500/10 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100 dark:focus:ring-blue-400/10"
           />
           <button
             type="button"
             onClick={() => setShowKey((v) => !v)}
             aria-label={showKey ? 'Masquer la clé' : 'Afficher la clé'}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-slate-700"
+            className="tap absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
           >
-            {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+            <span key={showKey ? 'off' : 'on'} className="inline-flex animate-icon-swap">
+              {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+            </span>
           </button>
         </div>
 
@@ -75,9 +77,9 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
             type="button"
             disabled={!settings.apiKey.trim() || testing}
             onClick={() => void handleTest()}
-            className="flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 py-2.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-40"
+            className="press flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 py-2.5 text-xs font-bold text-white shadow-sm shadow-blue-600/20 hover:bg-blue-700 disabled:opacity-40 disabled:shadow-none"
           >
-            <Wifi size={14} />
+            {testing ? <Loader2 size={14} className="animate-spin" /> : <Wifi size={14} />}
             {testing ? 'Test…' : 'Tester'}
           </button>
 
@@ -88,7 +90,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
               clearApiKey()
               setStatus(null)
             }}
-            className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-800 dark:text-slate-300"
+            className="press flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 py-2.5 text-xs font-bold text-slate-600 hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-800 dark:text-slate-300 dark:hover:border-slate-700 dark:hover:bg-slate-800"
           >
             <Trash2 size={14} />
             Retirer la clé
@@ -97,8 +99,9 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
 
         {status ? (
           <p
-            className={`text-center text-xs font-semibold ${
-              status.ok ? 'text-emerald-600' : 'text-rose-500'
+            key={status.message}
+            className={`animate-toast-in text-center text-xs font-semibold ${
+              status.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500 dark:text-rose-400'
             }`}
           >
             {status.message}
@@ -106,16 +109,34 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
         ) : null}
       </div>
 
-      <label className="flex cursor-pointer items-center justify-between rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm font-bold text-slate-800 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100">
+      <label className="flex cursor-pointer items-center justify-between rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm font-bold text-slate-800 transition-colors duration-300 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:hover:border-slate-700">
         <span>Mode sombre</span>
-        <input
-          type="checkbox"
-          checked={settings.theme === 'dark'}
-          onChange={(e) =>
-            updateSettings({ theme: e.target.checked ? 'dark' : 'light' })
-          }
-          className="h-5 w-5 rounded border-slate-300 text-indigo-600"
-        />
+        <span className="relative inline-flex shrink-0 items-center">
+          <input
+            type="checkbox"
+            checked={settings.theme === 'dark'}
+            onChange={(e) =>
+              updateSettings({ theme: e.target.checked ? 'dark' : 'light' })
+            }
+            className="peer sr-only"
+          />
+          <span
+            aria-hidden="true"
+            className="h-6 w-11 rounded-full bg-slate-200 transition-colors duration-300 ease-smooth peer-checked:bg-indigo-600 peer-focus-visible:ring-4 peer-focus-visible:ring-indigo-500/20 dark:bg-slate-700"
+          />
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute left-0.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full bg-white shadow transition-transform duration-300 ease-smooth peer-checked:translate-x-5"
+          >
+            <span key={settings.theme} className="inline-flex animate-icon-swap">
+              {settings.theme === 'dark' ? (
+                <Moon className="h-3 w-3 text-indigo-600" />
+              ) : (
+                <Sun className="h-3 w-3 text-amber-500" />
+              )}
+            </span>
+          </span>
+        </span>
       </label>
     </div>
   )
