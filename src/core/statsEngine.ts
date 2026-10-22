@@ -9,7 +9,7 @@ import {
   type WorkoutSet,
 } from './types'
 
-export type ChartMetric = 'maxWeight' | 'reps' | 'volume'
+export type ChartMetric = 'maxWeight' | 'volume' | 'rest' | 'work'
 
 export interface EnrichedHistoryEntry {
   entry: ExerciseEntry
@@ -38,10 +38,14 @@ function detectExplicitVariant(exercise: Exercise, note: string): string | null 
   if (/poulie\s+haute/.test(n)) return 'Poulie haute'
   if (/poulie\s+basse|poulis\s+basse/.test(n)) return 'Poulie basse'
   if (/dans\s+le\s+dos/.test(n)) return 'Presse poids dos'
-  if (/par\s+c[oô]t[eé]/.test(n)) return 'Par côté'
+  // Mollets debout / jambes tendues (ex: « Calf » à la machine) : nouvelle variante,
+  // les charges ne sont pas comparables avec la machine assise.
+  if (/jambes?\s+tendues?|\btendues?\b/.test(n)) return 'Jambes tendues'
+  if (/\bcalf\b|\bkhalf\b|debout/.test(n)) return 'Debout (Calf)'
   if (/machine\s*1\b/.test(n)) return 'Machine 1'
   if (/machine\s*2\b/.test(n)) return 'Machine 2'
-  if (/\bcalf\b|debout/.test(n)) return 'Debout (Calf)'
+  if (/par\s+c[oô]t[eé]/.test(n)) return 'Par côté'
+  if (/\bassise?\b/.test(n)) return 'Assis'
   if (/prone\s+leg\s+curl/.test(n)) return 'Prone leg curl'
   if (/wide\s+chest\s+press/.test(n)) return 'Wide chest press'
   if (!/halt[eè]re/i.test(exercise.name) && /\bhalt[eè]res?\b/.test(n)) {
@@ -151,6 +155,49 @@ export function getLatestBestSetSummary(exercise: Exercise): string {
   const variantSuffix =
     latest.variant !== 'Standard' ? ` (${latest.variant.toLowerCase()})` : ''
   return `${formatNumberFr(latest.topWeight)} kg × ${formatNumberFr(latest.topSetRepsAtPeak)}${variantSuffix}`
+}
+
+export interface LatestRecordInfo {
+  /** Vrai si la dernière séance réalisée est le meilleur poids de la variante en cours */
+  isRecord: boolean
+  topWeight: number
+  topSetRepsAtPeak: number
+  variant: string
+}
+
+/**
+ * Détecte un record (PR) sur la dernière séance réellement effectuée.
+ * Les lignes (Objectif) ne comptent pas : un objectif planifié n'est pas une perf.
+ */
+export function getLatestRecordInfo(exercise: Exercise): LatestRecordInfo | null {
+  const performed = buildEnrichedChronology(exercise).filter(
+    (c) => !c.entry.wasObjective && c.hasValidWeight,
+  )
+  if (performed.length === 0) return null
+
+  const latest = performed[performed.length - 1]
+  const previous = performed
+    .slice(0, -1)
+    .filter((c) => c.variant === latest.variant)
+  if (previous.length === 0) {
+    return {
+      isRecord: false,
+      topWeight: latest.topWeight,
+      topSetRepsAtPeak: latest.topSetRepsAtPeak,
+      variant: latest.variant,
+    }
+  }
+
+  const bestWeightBefore = Math.max(...previous.map((c) => c.topWeight))
+  // Un PR = une charge jamais soulevée sur cette variante (une rep de plus = progression, pas un record).
+  const isRecord = latest.topWeight > bestWeightBefore + 0.01
+
+  return {
+    isRecord,
+    topWeight: latest.topWeight,
+    topSetRepsAtPeak: latest.topSetRepsAtPeak,
+    variant: latest.variant,
+  }
 }
 
 /**

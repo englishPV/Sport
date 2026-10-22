@@ -27,7 +27,9 @@ import {
   buildEnrichedChronology,
   computeSmartExerciseInsight,
   getLatestBestSetSummary,
+  getLatestRecordInfo,
 } from './statsEngine'
+import { buildStatsReport } from './statsReport'
 
 describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
   const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
@@ -467,6 +469,82 @@ describe('Temps de repos scientifiques hypertrophie (restScience)', () => {
       e.name.startsWith('Extensions Triceps'),
     )!
     expect(getLatestBestSetSummary(triceps)).toBe('15 kg × 11,5')
+  })
+
+  it('classe « Calf » / mollets debout comme isolation et reconnaît la variante jambes tendues', () => {
+    const calf = parseNotepad(
+      'Jambes (Legs)\n\nCalf debout (jambes tendues) :\n• 22/10/2026 : 40kg x 15, 15, 12, 12 (repos : 2min)\n',
+    ).exercises[0]
+
+    expect(calf.name).toBe('Calf debout (jambes tendues)')
+    // Mollets = isolation (12-15 reps) et incrément de 5 kg, comme la machine assise
+    expect(calf.category).toBe('iso')
+    expect(calf.repRange).toEqual([12, 15])
+    expect(calf.weightStep).toBe(5)
+    expect(calf.defaultRestSeconds).toBe(120)
+  })
+
+  it('signale un PR uniquement quand la dernière séance réalisée dépasse la variante en cours', () => {
+    const parsed = parseNotepad(
+      [
+        'Jambes (Legs)',
+        '',
+        'Calf debout (jambes tendues) :',
+        '• 22/10/2026 : 45kg (par côté) x 15, 12 (repos : 2min)',
+        '• 15/10/2026 : 40kg (par côté) x 15, 12 (repos : 2min)',
+        '• 08/10/2026 : 35kg (par côté) x 15, 15 (repos : 2min)',
+        '',
+        'Leg extension :',
+        '• 22/10/2026 (Objectif) : 60kg x 12',
+        '• 22/10/2026 : 50kg x 12',
+        '• 15/10/2026 : 55kg x 12',
+        '',
+      ].join('\n'),
+    )
+
+    const calf = parsed.exercises.find((e) => e.name === 'Calf debout (jambes tendues)')!
+    // 45 kg dépasse les 40 kg de la séance précédente sur la même variante : c'est un PR
+    expect(getLatestRecordInfo(calf)?.isRecord).toBe(true)
+
+    const legExtension = parsed.exercises.find((e) => e.name === 'Leg extension')!
+    // L'objectif 60 kg du 22/10 n'est pas une perf : le dernier vrai 50 kg n'est pas un PR
+    expect(getLatestRecordInfo(legExtension)?.isRecord).toBe(false)
+  })
+
+  it('génère un bilan complet prêt pour une IA (volume, records, variantes, temps)', () => {
+    const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    const report = buildStatsReport({
+      exercises: parsed.exercises,
+      profile: { heightCm: 184, weightKg: 72 },
+      now: new Date('2026-10-22T12:00:00'),
+    })
+
+    // En-tête et contexte
+    expect(report).toContain('# Bilan musculation')
+    expect(report).toContain('1m84')
+    expect(report).toContain('72 kg')
+    expect(report).toContain('Double Progression Dynamique')
+
+    // Chiffres clés calculés
+    expect(report).toMatch(/Volume total soulevé : \*\*[\d ]+ kg\*\*/)
+    expect(report).toContain('Répartition : Haut')
+    expect(report).toContain('Séance la plus volumineuse')
+
+    // Détail par exercice, records et variantes d'équipement
+    expect(report).toContain('### Leg press')
+    expect(report).toContain('- Record :')
+    expect(report).toContain('Variantes d’équipement')
+    expect(report).toContain('Charges non comparables entre variantes')
+    expect(report).toContain('Machine assis (mollets)')
+
+    // Les lignes (Objectif) ne sont jamais comptées comme des séances réalisées
+    expect(report).toContain('Objectif en cours')
+    const latestLine = report.split('\n').find((line) => line.startsWith('- Dernière séance'))
+    expect(latestLine).toBeDefined()
+
+    // Les temps sont expliqués même quand il n'y a pas encore de données
+    expect(report).toContain('Temps à la salle')
+    expect(report).toContain('Ce que j’attends de toi (coach)')
   })
 
   it('garantit un aller-retour export/import 100% idempotent sans perte sur les 762 séries (y compris demi-reps)', () => {

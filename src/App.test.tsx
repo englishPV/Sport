@@ -226,10 +226,34 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     expect(screen.getByText('? kg × 10, 8, 5')).toBeInTheDocument()
     expect(screen.getAllByText('Poulie basse').length).toBeGreaterThan(0)
 
-    // Pas de jargon "1RM" : les métriques sont Poids / Reps / Total
+    // Pas de jargon "1RM" : les métriques sont Poids / Total / Repos / Durée
     expect(screen.queryByRole('button', { name: '1RM' })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Reps' }))
-    expect(screen.getByText('15 reps')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reps' })).not.toBeInTheDocument()
+
+    // Les temps (repos / exécution) remplacent les répétitions, avec un message clair sans données
+    await user.click(screen.getByRole('button', { name: 'Repos' }))
+    expect(screen.getAllByText('2,5 min').length).toBeGreaterThan(0)
+
+    await user.click(screen.getByRole('button', { name: 'Durée' }))
+    expect(screen.getByText(/Pas encore de temps d'exécution/i)).toBeInTheDocument()
+  })
+
+  it('copie un bilan complet des statistiques prêt à coller dans une IA', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Statistiques' }))
+    const copyButton = screen.getByRole('button', { name: 'Copier les statistiques' })
+    expect(copyButton).toHaveTextContent('Copier')
+
+    await user.click(copyButton)
+
+    const clipboardText = await navigator.clipboard.readText()
+    expect(clipboardText).toContain('# Bilan musculation')
+    expect(clipboardText).toContain('Volume total soulevé')
+    expect(clipboardText).toContain('### Leg press')
+    expect(clipboardText).toContain('Ce que j’attends de toi (coach)')
+    expect(copyButton).toHaveTextContent('Copié')
   })
 
   it('conserve les séries validées quand on revient à l’accueil via ←, les inclut dans le .txt, et permet d’effacer un essai rapide', async () => {

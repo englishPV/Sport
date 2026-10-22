@@ -43,7 +43,7 @@ export function inferExerciseMeta(name: string): {
   }
 
   const isIso =
-    /\b(elevation|elevations|triceps|biceps|curl|mollet|mollets|calf|abdo|abdominaux|crunch|oiseau|shrug|shrugs)\b/.test(
+    /\b(elevation|elevations|triceps|biceps|curl|mollet|mollets|calf|khalf|abdo|abdominaux|crunch|oiseau|shrug|shrugs)\b/.test(
       norm,
     ) || norm.includes('extension au dessus')
 
@@ -66,6 +66,8 @@ export function inferExerciseMeta(name: string): {
     norm.includes('leg extension') ||
     norm.includes('leg curl') ||
     norm.includes('mollet') ||
+    norm.includes('calf') ||
+    norm.includes('khalf') ||
     norm.includes('abdominaux')
   ) {
     weightStep = 5
