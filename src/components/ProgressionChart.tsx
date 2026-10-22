@@ -18,24 +18,38 @@ export interface ChartPoint {
   note: string
 }
 
+function metricValue(item: EnrichedHistoryEntry, metric: ChartMetric): number | null {
+  switch (metric) {
+    case 'maxWeight':
+      return item.hasValidWeight ? item.topWeight : null
+    case 'volume':
+      return item.hasValidWeight ? item.volumeKg : null
+    case 'rest':
+      return typeof item.entry.restSeconds === 'number' && item.entry.restSeconds > 0
+        ? Math.round((item.entry.restSeconds / 60) * 10) / 10
+        : null
+    case 'work':
+      return typeof item.entry.workSeconds === 'number' && item.entry.workSeconds > 0
+        ? Math.round((item.entry.workSeconds / 60) * 10) / 10
+        : null
+    default:
+      return null
+  }
+}
+
 export function buildExerciseSeries(
   exercise: Exercise,
   metric: ChartMetric,
   onlyPrimaryVariant = false,
 ): ChartPoint[] {
   const chrono = buildEnrichedChronology(exercise).filter((c: EnrichedHistoryEntry) => {
-    if (!c.hasValidWeight) return false
+    if (metricValue(c, metric) === null) return false
     if (onlyPrimaryVariant && !c.isPrimaryVariant) return false
     return true
   })
 
   return chrono.map((item) => {
-    const value =
-      metric === 'maxWeight'
-        ? item.topWeight
-        : metric === 'volume'
-          ? item.volumeKg
-          : item.topSetRepsAtPeak
+    const value = metricValue(item, metric) ?? 0
 
     return {
       entryId: item.entry.id,
@@ -47,6 +61,11 @@ export function buildExerciseSeries(
       note: item.entry.note,
     }
   })
+}
+
+/** Une métrique de temps se lit en minutes, pas en kilos. */
+function isTimeMetric(metric: ChartMetric): boolean {
+  return metric === 'rest' || metric === 'work'
 }
 
 export function ProgressionChart({
@@ -66,7 +85,9 @@ export function ProgressionChart({
   )
 
   const hasVariantSwitch =
-    primaryPoints.length >= 2 && primaryPoints.length < allPoints.length
+    !isTimeMetric(metric) &&
+    primaryPoints.length >= 2 &&
+    primaryPoints.length < allPoints.length
 
   const [filterSameMachine, setFilterSameMachine] = useState<boolean>(true)
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null)
@@ -82,9 +103,15 @@ export function ProgressionChart({
     hasVariantSwitch && filterSameMachine ? primaryPoints : allPoints
 
   if (points.length === 0) {
+    const emptyMessage =
+      metric === 'rest'
+        ? "Pas encore de temps de repos enregistré. Ils sont notés automatiquement quand tu suis une séance dans l'app (ou via « repos : 2min30 » dans le carnet)."
+        : metric === 'work'
+          ? "Pas encore de temps d'exécution enregistré. Le chrono de séance les mesure automatiquement quand tu valides tes séries dans l'app."
+          : 'Pas encore de données enregistrées pour cet exercice.'
     return (
-      <div className="rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
-        Pas encore de données enregistrées pour cet exercice.
+      <div className="animate-fade-in rounded-2xl bg-slate-50 p-6 text-center text-sm leading-relaxed text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
+        {emptyMessage}
       </div>
     )
   }
@@ -104,14 +131,16 @@ export function ProgressionChart({
   const latestVariant = points[points.length - 1].variant
   let peakIdx = -1
   let peakVal = -Infinity
-  points.forEach((p, idx) => {
-    if (p.variant === latestVariant && p.value >= peakVal) {
-      peakVal = p.value
-      peakIdx = idx
-    }
-  })
+  if (!isTimeMetric(metric)) {
+    points.forEach((p, idx) => {
+      if (p.variant === latestVariant && p.value >= peakVal) {
+        peakVal = p.value
+        peakIdx = idx
+      }
+    })
+  }
 
-  const span = Math.max(2, maxVal - minVal)
+  const span = Math.max(isTimeMetric(metric) ? 0.5 : 2, maxVal - minVal)
   const yMin = Math.max(0, Math.floor(minVal - span * 0.15))
   const yMax = Math.ceil(maxVal + span * 0.15)
 
@@ -147,21 +176,16 @@ export function ProgressionChart({
   const labelStride = Math.max(1, Math.ceil(coords.length / 6))
 
   const strokeColor =
-    metric === 'reps' ? '#4f46e5' : metric === 'maxWeight' ? '#0284c7' : '#059669'
+    metric === 'maxWeight'
+      ? '#0284c7'
+      : metric === 'volume'
+        ? '#059669'
+        : metric === 'rest'
+          ? '#d97706'
+          : '#7c3aed'
 
-  const unitLabel =
-    metric === 'reps'
-      ? Math.abs(activePoint.value) <= 1
-        ? 'rep'
-        : 'reps'
-      : 'kg'
-
-  const deltaUnitLabel =
-    metric === 'reps'
-      ? deltaFromPrev !== null && Math.abs(deltaFromPrev) <= 1
-        ? 'rep'
-        : 'reps'
-      : 'kg'
+  const unitLabel = isTimeMetric(metric) ? 'min' : 'kg'
+  const deltaUnitLabel = unitLabel
 
   const linePath = coords
     .map((c, i) => `${i === 0 ? 'M' : 'L'} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`)

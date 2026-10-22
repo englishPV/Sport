@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ChevronDown } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ArrowLeft, Check, ChevronDown, Copy } from 'lucide-react'
 import { Collapse } from '../components/motion'
 import { ProgressionChart, type ChartMetric } from '../components/ProgressionChart'
 import { buildStatsFingerprint } from '../core/gemini'
+import { copyText } from '../core/clipboard'
 import {
   buildEnrichedChronology,
   computeSmartExerciseInsight,
   getLatestBestSetSummary,
+  getLatestRecordInfo,
 } from '../core/statsEngine'
+import { buildStatsReport } from '../core/statsReport'
 import {
   formatIsoToFr,
   formatRestDuration,
@@ -18,6 +21,13 @@ import {
   type SectionId,
 } from '../core/types'
 import { useWorkoutStore } from '../store/useWorkoutStore'
+
+const METRIC_OPTIONS: readonly { id: ChartMetric; label: string; hint: string }[] = [
+  { id: 'maxWeight', label: 'Poids', hint: 'Charge max par séance' },
+  { id: 'volume', label: 'Total', hint: 'Volume soulevé (kg × reps)' },
+  { id: 'rest', label: 'Repos', hint: 'Temps de repos moyen (min)' },
+  { id: 'work', label: 'Durée', hint: 'Temps d’exécution (min)' },
+]
 
 function formatDurationShort(totalSeconds: number): string {
   const s = Math.max(0, Math.round(totalSeconds))
@@ -99,6 +109,8 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const aiStatsError = useWorkoutStore((s) => s.aiStatsError)
   const refreshAiStats = useWorkoutStore((s) => s.refreshAiStats)
   const apiKey = useWorkoutStore((s) => s.settings.apiKey)
+  const profileHeightCm = useWorkoutStore((s) => s.settings.profileHeightCm)
+  const profileWeightKg = useWorkoutStore((s) => s.settings.profileWeightKg)
   const deleteHistoryEntry = useWorkoutStore((s) => s.deleteHistoryEntry)
   const deleteCompletedSession = useWorkoutStore((s) => s.deleteCompletedSession)
 
@@ -109,6 +121,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const [showHistoryExId, setShowHistoryExId] = useState<string | null>(null)
   const [showRecentTimings, setShowRecentTimings] = useState(false)
   const [metric, setMetric] = useState<ChartMetric>('maxWeight')
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
 
   useEffect(() => {
     if (apiKey.trim()) {
@@ -147,6 +160,22 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
     [activeAllExercises, localInsightsById],
   )
 
+  const handleCopyStats = useCallback(async () => {
+    const report = buildStatsReport({
+      exercises,
+      completedSessions,
+      profile: { heightCm: profileHeightCm, weightKg: profileWeightKg },
+    })
+    const ok = await copyText(report)
+    setCopyState(ok ? 'copied' : 'error')
+  }, [exercises, completedSessions, profileHeightCm, profileWeightKg])
+
+  useEffect(() => {
+    if (copyState === 'idle') return
+    const timer = window.setTimeout(() => setCopyState('idle'), 2600)
+    return () => window.clearTimeout(timer)
+  }, [copyState])
+
   const totalUniqueDates = useMemo(() => {
     let total = 0
     for (const sec of ['up', 'legs'] as SectionId[]) {
@@ -172,23 +201,71 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
     return total
   }, [exercises])
 
+  const sessionTimings = useMemo(() => {
+    if (completedSessions.length === 0) return null
+    const total = completedSessions.reduce((sum, s) => sum + s.totalDurationSeconds, 0)
+    const work = completedSessions.reduce((sum, s) => sum + s.totalWorkSeconds, 0)
+    const rest = completedSessions.reduce((sum, s) => sum + s.totalRestSeconds, 0)
+    return {
+      count: completedSessions.length,
+      average: Math.round(total / completedSessions.length),
+      work,
+      rest,
+    }
+  }, [completedSessions])
+
   return (
     <div className="mx-auto max-w-xl space-y-4 px-4 py-6">
-      {onBack ? (
-        <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
+        {onBack ? (
           <button
             type="button"
             onClick={onBack}
             aria-label="Retour"
-            className="tap flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
+            className="tap flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
           >
             <ArrowLeft size={20} />
           </button>
-          <h1 className="text-base font-extrabold text-slate-900 dark:text-white">
-            Statistiques
-          </h1>
-          <div className="w-10" />
-        </div>
+        ) : (
+          <div className="w-10 shrink-0" />
+        )}
+        <h1 className="flex-1 text-center text-base font-extrabold text-slate-900 dark:text-white">
+          Statistiques
+        </h1>
+
+        {/* Léger bouton pour copier tout le bilan et le donner à son IA / coach */}
+        <button
+          type="button"
+          onClick={() => void handleCopyStats()}
+          aria-label="Copier les statistiques"
+          title="Copier toutes les stats (prêt à coller dans ton IA)"
+          className={`tap inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl border px-2.5 text-xs font-semibold ${
+            copyState === 'copied'
+              ? 'border-emerald-300/70 bg-emerald-500/10 text-emerald-700 dark:border-emerald-500/40 dark:text-emerald-300'
+              : copyState === 'error'
+                ? 'border-rose-300/70 bg-rose-500/10 text-rose-600 dark:border-rose-500/40 dark:text-rose-300'
+                : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 dark:border-slate-800 dark:text-slate-400 dark:hover:border-slate-700 dark:hover:bg-slate-900 dark:hover:text-slate-200'
+          }`}
+        >
+          <span key={copyState} className="inline-flex animate-icon-swap">
+            {copyState === 'copied' ? (
+              <Check size={15} />
+            ) : (
+              <Copy size={15} />
+            )}
+          </span>
+          {copyState === 'copied'
+            ? 'Copié'
+            : copyState === 'error'
+              ? 'Erreur'
+              : 'Copier'}
+        </button>
+      </div>
+
+      {copyState === 'error' ? (
+        <p className="animate-toast-in text-right text-[11px] font-medium text-rose-500 dark:text-rose-400">
+          Copie impossible sur ce navigateur.
+        </p>
       ) : null}
 
       {/* Synthèse globale concise (locale immédiate + enrichissement Gemini 3.8 Flash High) */}
@@ -234,6 +311,15 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
         >
           {freshAiStats ? freshAiStats.headline : localSynthesis.headline}
         </p>
+
+        {sessionTimings ? (
+          <p className="mt-1 animate-fade-in text-[11px] font-medium text-slate-400 dark:text-slate-500">
+            Temps à la salle : {formatDurationShort(sessionTimings.average)} en moyenne sur{' '}
+            {sessionTimings.count} séance{sessionTimings.count > 1 ? 's' : ''} · effort{' '}
+            {formatDurationShort(sessionTimings.work)} · repos{' '}
+            {formatDurationShort(sessionTimings.rest)}
+          </p>
+        ) : null}
 
         {(freshAiStats ? freshAiStats.bulletPoints : localSynthesis.bullets).length > 0 ? (
           <ul className="mt-2 space-y-1">
@@ -363,6 +449,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
             localInsightsById[ex.id] ??
             computeSmartExerciseInsight(ex)
           const latestSummary = getLatestBestSetSummary(ex)
+          const recordInfo = getLatestRecordInfo(ex)
           const realSessionsCount = ex.entries.filter(
             (e) => !e.skipOnly && e.sets.length > 0,
           ).length
@@ -397,6 +484,14 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
+                  {recordInfo?.isRecord ? (
+                    <span
+                      title="Nouveau record sur la dernière séance"
+                      className="animate-pop-in rounded-full bg-amber-500/15 px-2 py-1 text-[10px] font-extrabold text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
+                    >
+                      PR
+                    </span>
+                  ) : null}
                   <span
                     className={`rounded-full px-2.5 py-1 text-xs font-bold ${statusBadgeClasses(
                       insight.status,
@@ -426,29 +521,27 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                     <span className="text-xs font-semibold text-slate-400">
                       {SECTION_LABELS[ex.section].short} · {realSessionsCount} séances
                     </span>
-                    <div className="relative grid grid-cols-3 rounded-xl bg-slate-100 p-0.5 text-xs dark:bg-slate-800">
+                    <div className="relative grid shrink-0 grid-cols-4 rounded-xl bg-slate-100 p-0.5 text-xs dark:bg-slate-800">
                       <span
                         aria-hidden="true"
-                        className={`pointer-events-none absolute inset-y-0.5 left-0.5 w-[calc((100%_-_0.25rem)/3)] rounded-lg bg-white shadow-sm transition-transform duration-300 ease-smooth dark:bg-slate-900 ${
-                          metric === 'reps'
+                        className={`pointer-events-none absolute inset-y-0.5 left-0.5 w-[calc((100%_-_0.25rem)/4)] rounded-lg bg-white shadow-sm transition-transform duration-300 ease-smooth dark:bg-slate-900 ${
+                          metric === 'volume'
                             ? 'translate-x-full'
-                            : metric === 'volume'
+                            : metric === 'rest'
                               ? 'translate-x-[200%]'
-                              : 'translate-x-0'
+                              : metric === 'work'
+                                ? 'translate-x-[300%]'
+                                : 'translate-x-0'
                         }`}
                       />
-                      {(
-                        [
-                          { id: 'maxWeight', label: 'Poids' },
-                          { id: 'reps', label: 'Reps' },
-                          { id: 'volume', label: 'Total' },
-                        ] as const
-                      ).map((m) => (
+                      {METRIC_OPTIONS.map((m) => (
                         <button
                           key={m.id}
                           type="button"
+                          title={m.hint}
+                          aria-pressed={metric === m.id}
                           onClick={() => setMetric(m.id)}
-                          className={`relative z-10 rounded-lg px-2.5 py-1 font-semibold transition-all duration-300 ease-smooth active:scale-95 ${
+                          className={`relative z-10 rounded-lg px-1.5 py-1 text-[11px] font-semibold transition-all duration-300 ease-smooth active:scale-95 sm:text-xs ${
                             metric === m.id
                               ? 'text-indigo-600 dark:text-indigo-400'
                               : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'

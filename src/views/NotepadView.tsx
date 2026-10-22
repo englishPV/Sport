@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Check, Copy, Download, RotateCcw, Sparkles, Upload } from 'lucide-react'
+import { copyText } from '../core/clipboard'
 import { exportNotepad } from '../core/parser'
 import { useWorkoutStore } from '../store/useWorkoutStore'
 
@@ -44,20 +45,8 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
   }
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(displayedText)
-      flash('Copié')
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = displayedText
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-      flash('Copié')
-    }
+    const ok = await copyText(displayedText)
+    flash(ok ? 'Copié' : 'Copie impossible sur ce navigateur')
   }
 
   const handleDownload = () => {
