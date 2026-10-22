@@ -11,6 +11,7 @@ import {
   Sparkles,
   Sun,
 } from 'lucide-react'
+import { HistoryValueInput } from '../components/HistoryValueInput'
 import { Popover, Toast, useDismiss } from '../components/motion'
 import { getRecommendedSection } from '../core/ddp'
 import type { SectionId } from '../core/types'
@@ -757,22 +758,21 @@ export function WorkoutView() {
               −
             </button>
 
-            <div className="flex items-baseline justify-center gap-1.5">
-              <input
-                type="number"
-                inputMode="decimal"
-                step="any"
-                aria-label="Poids en kg"
-                value={currentSet.weight}
-                onChange={(e) =>
-                  updateDraftSet(currentEx.id, currentSet.id, {
-                    weight: e.target.value === '' ? 0 : Number(e.target.value),
-                  })
-                }
-                className={`w-24 bg-transparent text-right text-3xl font-extrabold tabular-nums transition-colors duration-300 ease-smooth focus:outline-none ${wStyle.text}`}
-              />
-              <span className={`text-sm font-bold ${wStyle.unit}`}>kg</span>
-            </div>
+            <HistoryValueInput
+              label="Poids en kg"
+              unit="kg"
+              value={currentSet.weight}
+              previousValue={currentSet.prevWeight}
+              step="any"
+              inputMode="decimal"
+              onChange={(e) =>
+                updateDraftSet(currentEx.id, currentSet.id, {
+                  weight: e.target.value === '' ? 0 : Number(e.target.value),
+                })
+              }
+              inputClassName={`w-24 bg-transparent text-right text-3xl font-extrabold tabular-nums transition-colors duration-300 ease-smooth focus:outline-none ${wStyle.text}`}
+              unitClassName={`text-sm font-bold ${wStyle.unit}`}
+            />
 
             <button
               type="button"
@@ -810,25 +810,24 @@ export function WorkoutView() {
               −
             </button>
 
-            <div className="flex items-baseline justify-center gap-1.5">
-              <input
-                type="number"
-                inputMode="decimal"
-                step="0.5"
-                aria-label="Nombre de répétitions"
-                value={currentSet.reps}
-                onChange={(e) =>
-                  updateDraftSet(currentEx.id, currentSet.id, {
-                    reps:
-                      e.target.value === ''
-                        ? 0
-                        : Math.max(0, Math.round(Number(e.target.value) * 2) / 2),
-                  })
-                }
-                className={`w-20 bg-transparent text-right text-3xl font-extrabold tabular-nums transition-colors duration-300 ease-smooth focus:outline-none ${rStyle.text}`}
-              />
-              <span className={`text-sm font-bold ${rStyle.unit}`}>reps</span>
-            </div>
+            <HistoryValueInput
+              label="Nombre de répétitions"
+              unit="reps"
+              value={currentSet.reps}
+              previousValue={currentSet.prevReps}
+              step="0.5"
+              inputMode="decimal"
+              onChange={(e) =>
+                updateDraftSet(currentEx.id, currentSet.id, {
+                  reps:
+                    e.target.value === ''
+                      ? 0
+                      : Math.max(0, Math.round(Number(e.target.value) * 2) / 2),
+                })
+              }
+              inputClassName={`w-20 bg-transparent text-right text-3xl font-extrabold tabular-nums transition-colors duration-300 ease-smooth focus:outline-none ${rStyle.text}`}
+              unitClassName={`text-sm font-bold ${rStyle.unit}`}
+            />
 
             <button
               type="button"

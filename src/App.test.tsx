@@ -1,8 +1,9 @@
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { formatNumberFr } from './core/types'
 import { STORAGE_KEY, useWorkoutStore } from './store/useWorkoutStore'
 import { computePerfState } from './views/WorkoutView'
 
@@ -63,6 +64,54 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
 
     const repsCard = screen.getByTestId('reps-card')
     expect(repsCard).toHaveAttribute('data-perf', 'target')
+  })
+
+  it('révèle la valeur de la séance précédente au maintien, sans menu de copie sur mobile', async () => {
+    useWorkoutStore.getState().updateSettings({ apiKey: '' })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Commencer' }))
+
+    const state = useWorkoutStore.getState()
+    const activeExercises = state.exercises.filter(
+      (exercise) => exercise.section === state.activeDraft.section && exercise.active,
+    )
+    const exercise = activeExercises[state.cursor.exerciseIdx]
+    const currentSet = state.activeDraft.logs[exercise.id].sets[state.cursor.setIdx]
+    expect(currentSet.prevWeight).not.toBeNull()
+    expect(currentSet.prevReps).not.toBeNull()
+
+    const weightInput = screen.getByRole('spinbutton', { name: 'Poids en kg' })
+    const repsInput = screen.getByRole('spinbutton', { name: 'Nombre de répétitions' })
+
+    vi.useFakeTimers()
+    try {
+      fireEvent.pointerDown(weightInput, { button: 0, pointerType: 'touch' })
+      act(() => vi.advanceTimersByTime(420))
+      expect(screen.getByRole('status')).toHaveTextContent(
+        `${formatNumberFr(currentSet.prevWeight!)} kg`,
+      )
+      expect(screen.getByRole('status')).toHaveTextContent('dernière fois')
+      fireEvent.pointerUp(weightInput, { button: 0, pointerType: 'touch' })
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+
+      fireEvent.pointerDown(repsInput, { button: 0, pointerType: 'touch' })
+      act(() => vi.advanceTimersByTime(420))
+      expect(screen.getByRole('status')).toHaveTextContent(
+        `${formatNumberFr(currentSet.prevReps!)} reps`,
+      )
+      expect(screen.getByRole('status')).toHaveTextContent('dernière fois')
+      fireEvent.pointerUp(repsInput, { button: 0, pointerType: 'touch' })
+
+      // Un appui long ne déclenche ni sélection/copier ni le menu contextuel du téléphone.
+      expect(fireEvent.contextMenu(weightInput)).toBe(false)
+      expect(fireEvent.copy(weightInput)).toBe(false)
+      expect(weightInput).toHaveClass('select-none')
+      expect(repsInput).toHaveClass('select-none')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("n'écrase jamais une série déjà modifiée par l'utilisateur quand Gemini répond en arrière-plan", async () => {
