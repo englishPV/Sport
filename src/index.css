@@ -54,6 +54,14 @@
   .press {
     @apply transition duration-200 ease-smooth active:scale-[0.97];
   }
+
+  /* Évite le menu de sélection/copie natif sur les valeurs maintenues au doigt. */
+  .long-press-value,
+  .long-press-value * {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
 }
 
 /* Bascule clair / sombre : on laisse les couleurs se fondre ~300 ms. */
