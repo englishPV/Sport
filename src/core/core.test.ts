@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_NOTEPAD_TEXT } from './defaultNotepad'
 
 const TEST_VERTEX_KEY = 'AQ.TestVertexExpressDummyKey0000'
@@ -11,12 +11,18 @@ import {
 import { buildDdpSessionPlan, computeExerciseDdpPlan, getRecommendedSection } from './ddp'
 import {
   analyzeStatsWithGemini,
+  buildCoachPromptForSection,
   buildEndpointUrl,
   detectApiProvider,
+  extractAthleteRulesFromPreamble,
   GEMINI_MODEL,
   GEMINI_THINKING_LEVEL,
   generateGeminiSessionPlan,
+  isGeminiPlanFresh,
   parseWorkoutTextWithGemini,
+  resetGeminiClientState,
+  sanitizeApiKey,
+  testGeminiConnection,
 } from './gemini'
 import {
   computeSetRestDuration,
@@ -33,6 +39,11 @@ import { buildStatsReport } from './statsReport'
 
 describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
   const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+
+  afterEach(() => {
+    resetGeminiClientState()
+    vi.unstubAllGlobals()
+  })
 
   it('conserve le préambule DDP intact', () => {
     expect(parsed.preamble).toContain('RÈGLE SCIENTIFIQUE DE CHARGE')
@@ -567,5 +578,221 @@ describe('Temps de repos scientifiques hypertrophie (restScience)', () => {
 
     expect(countSets(parsed2.exercises)).toBe(countSets(parsed1.exercises))
     expect(exported2).toBe(exported1)
+  })
+
+  it('nettoie les clés API fraîchement copiées et bascule automatiquement en ?key=, cross-provider ou retry 429', async () => {
+    expect(
+      sanitizeApiKey('  GEMINI_API_KEY="AIzaSyBrandNewKey123\u200B\n"  '),
+    ).toBe('AIzaSyBrandNewKey123')
+    expect(sanitizeApiKey('Bearer   AQ.FreshVertexKey999\u00A0')).toBe(
+      'AQ.FreshVertexKey999',
+    )
+
+    // Cas 1 : échec CORS sur l'en-tête x-goog-api-key -> bascule transparente en ?key=
+    const corsFallbackFetch = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"status":"ok"}' }] } }],
+        }),
+      })
+    vi.stubGlobal('fetch', corsFallbackFetch)
+
+    const res1 = await testGeminiConnection('  "AIzaSyCorsNewKey111" ')
+    expect(res1.ok).toBe(true)
+    expect(res1.message).toContain('gemini-3.8-flash')
+    expect(corsFallbackFetch).toHaveBeenCalledTimes(2)
+    expect(String(corsFallbackFetch.mock.calls[1][0])).toContain(
+      'generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=AIzaSyCorsNewKey111',
+    )
+
+    // Cas 2 : clé AIza créée dans Google Cloud Vertex (403 sur AI Studio) + 429 transitoire -> bascule Vertex + retry
+    resetGeminiClientState()
+    const crossProviderFetch = vi
+      .fn()
+      // v1beta header -> 403
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        json: async () => ({
+          error: { message: 'Generative Language API has not been used in project' },
+        }),
+      })
+      // v1beta query -> 403
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        json: async () => ({
+          error: { message: 'Generative Language API has not been used in project' },
+        }),
+      })
+      // v1alpha -> 404 (skip direct)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: async () => ({ error: { message: 'Not found' } }),
+      })
+      // Vertex v1beta1 -> 429 transitoire (nouvelle clé) puis 200 OK !
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        json: async () => ({
+          error: { status: 'RESOURCE_EXHAUSTED', message: 'Rate limit spike' },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: '{"status":"ok"}' }] } }],
+        }),
+      })
+    vi.stubGlobal('fetch', crossProviderFetch)
+
+    const res2 = await testGeminiConnection('AIzaSyGcpVertexBoundKey222')
+    expect(res2.ok).toBe(true)
+    expect(String(crossProviderFetch.mock.calls[4][0])).toContain(
+      'aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:generateContent',
+    )
+  })
+
+  it('permet à l’utilisateur de modifier librement son .txt (nouvel exo vide, commentaires avec kg, préambule perso)', () => {
+    const customTxt = [
+      'Objectif personnel : focus contrôle excentrique 3s.',
+      '',
+      'Up',
+      'Développé incliné haltères :',
+      '• 26/10/2026 : 22kg x 10, 9 (repos : 2min30)',
+      '',
+      'Jambes (Legs)',
+      'Leg press :',
+      '• 24/10/2026 : 130kg x 12, 11 (repos : 2min30)',
+      '• 20/10/2026 : pas fait, machine 100kg occupée pour mes 3 séries',
+      '',
+      'Hip thrust :',
+      '',
+    ].join('\n')
+
+    expect(hasUnrecognizedWorkoutText(customTxt)).toBe(false)
+    const customParsed = parseNotepad(customTxt, { preserveCustomPreamble: true })
+    expect(customParsed.preamble).toBe('Objectif personnel : focus contrôle excentrique 3s.')
+
+    const hipThrust = customParsed.exercises.find((e) => e.name === 'Hip thrust')!
+    expect(hipThrust).toBeDefined()
+    expect(hipThrust.section).toBe('legs')
+    expect(hipThrust.active).toBe(true)
+
+    const reExported = exportNotepad(customParsed)
+    expect(reExported.startsWith('Objectif personnel : focus contrôle excentrique 3s.')).toBe(
+      true,
+    )
+    expect(reExported).toContain('Hip thrust :')
+  })
+
+  it('construit un prompt coach de haute précision et suit la fraîcheur des plans pré-générés par section', async () => {
+    const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
+    resetGeminiClientState()
+
+    const cleanRules = extractAthleteRulesFromPreamble(
+      `${parsed.preamble}\n Règle perso : ne jamais dépasser RPE 9 au roumain.`,
+    )
+    expect(cleanRules).toContain('Je mesure 1m84 pour 72kg')
+    expect(cleanRules).toContain('Règle perso : ne jamais dépasser RPE 9 au roumain.')
+    expect(cleanRules).not.toContain('UNIQUE BLOC DE CODE MARKDOWN')
+    expect(cleanRules).not.toContain('RÈGLE DE SÉLECTION DU JOUR')
+
+    const prompt = buildCoachPromptForSection({
+      section: 'up',
+      exercises: parsed.exercises,
+      preamble: parsed.preamble,
+      settings: { profileHeightCm: 184, profileWeightKg: 72 },
+    })
+    expect(prompt).toContain('ddp_mathematical_baseline')
+    expect(prompt).toContain('equipment_variant')
+    expect(prompt).toContain('target_reps')
+    expect(prompt).toContain('user_comment')
+    expect(prompt).not.toContain('UNIQUE BLOC DE CODE MARKDOWN')
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    summary_lines: ['Haut pré-généré avec succès.'],
+                    exercises: [
+                      {
+                        exercise_id: 'ex-developpe-incline-halteres',
+                        rest_seconds: 150,
+                        tip: 'Contrôle la descente.',
+                        sets: [
+                          {
+                            weight: 10,
+                            reps_min: 12,
+                            reps_max: 12,
+                            target_reps: 12,
+                            is_warmup: true,
+                          },
+                          {
+                            weight: 22,
+                            reps_min: 8,
+                            reps_max: 12,
+                            target_reps: 11,
+                            is_warmup: false,
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const upPlan = await generateGeminiSessionPlan({
+      section: 'up',
+      exercises: parsed.exercises,
+      preamble: parsed.preamble,
+      settings: {
+        apiKey: TEST_VERTEX_KEY,
+        profileHeightCm: 184,
+        profileWeightKg: 72,
+      },
+    })
+
+    expect(upPlan.exercises['ex-developpe-incline-halteres'].sets[1].suggestedReps).toBe(11)
+    expect(isGeminiPlanFresh(upPlan, parsed.exercises, 'up', parsed.preamble)).toBe(true)
+
+    // Ajouter une nouvelle séance Jambes NE périme PAS le plan Haut pré-généré !
+    const afterLegsSaved = parsed.exercises.map((ex) =>
+      ex.id === 'ex-leg-press'
+        ? {
+            ...ex,
+            entries: [
+              {
+                id: 'new-legs',
+                date: '2026-10-26',
+                sets: [{ weight: 135, reps: 10 }],
+                restSeconds: 150,
+                note: '',
+                rawLine: '• 26/10/2026 : 135kg x 10',
+              },
+              ...ex.entries,
+            ],
+          }
+        : ex,
+    )
+    expect(isGeminiPlanFresh(upPlan, afterLegsSaved, 'up', parsed.preamble)).toBe(true)
   })
 })

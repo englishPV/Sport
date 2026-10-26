@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
@@ -329,5 +329,178 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     // L'utilisateur peut effacer son petit test en 1 clic
     await user.click(screen.getByRole('button', { name: /Effacer l'essai/i }))
     expect(screen.getByRole('button', { name: 'Commencer' })).toBeInTheDocument()
+  })
+
+  it('pré-génère Haut (Up) quand on appuie sur Jambes (et génère Jambes si absent), puis confirme en fin de séance que la prochaine séance est déjà générée', async () => {
+    const user = userEvent.setup()
+
+    // Bloc-notes compact (1 exo Up, 1 exo Jambes) pour parcourir toute la séance jusqu'à l'écran final
+    useWorkoutStore.getState().clearApiKey()
+    await useWorkoutStore.getState().importNotepadSmart(
+      [
+        'Up',
+        'Développé incliné haltères :',
+        '• 22/10/2026 : 22kg x 10 (repos : 2min30)',
+        '',
+        'Jambes (Legs)',
+        'Leg press :',
+        '• 19/10/2026 : 130kg x 12 (repos : 2min30)',
+      ].join('\n'),
+    )
+    useWorkoutStore.getState().updateSettings({ apiKey: TEST_VERTEX_KEY })
+
+    const requestedPrompts: string[] = []
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      const parsedBody = JSON.parse(String(init?.body ?? '{}')) as {
+        contents?: { parts?: { text?: string }[] }[]
+      }
+      const promptText = parsedBody.contents?.[0]?.parts?.[0]?.text ?? ''
+      requestedPrompts.push(promptText)
+      const isUp = promptText.includes('Séance cible à planifier maintenant : Haut du corps (Up)')
+
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      summary_lines: [isUp ? 'Haut prêt' : 'Jambes prêt'],
+                      exercises: [
+                        isUp
+                          ? {
+                              exercise_id: 'ex-developpe-incline-halteres',
+                              rest_seconds: 150,
+                              tip: 'Contrôle la descente.',
+                              sets: [
+                                {
+                                  weight: 22.5,
+                                  reps_min: 8,
+                                  reps_max: 12,
+                                  target_reps: 11,
+                                  is_warmup: false,
+                                },
+                              ],
+                            }
+                          : {
+                              exercise_id: 'ex-leg-press',
+                              rest_seconds: 150,
+                              tip: 'Amplitude complète.',
+                              sets: [
+                                {
+                                  weight: 140,
+                                  reps_min: 8,
+                                  reps_max: 12,
+                                  target_reps: 9,
+                                  is_warmup: false,
+                                },
+                              ],
+                            },
+                      ],
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    // Appuie sur Jambes : génère Jambes (car pas encore généré) ET pré-génère Haut (Up) en tâche de fond
+    await user.click(screen.getByRole('button', { name: 'Jambes' }))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+    expect(requestedPrompts[0]).toContain('Séance cible à planifier maintenant : Jambes (Legs)')
+    expect(requestedPrompts[1]).toContain('Séance cible à planifier maintenant : Haut du corps (Up)')
+    expect(screen.getByText(/Prochaine Haut déjà générée/i)).toBeInTheDocument()
+
+    // Lance et termine la séance Jambes : aucun nouvel appel API car les 2 plans sont déjà prêts !
+    await user.click(screen.getByRole('button', { name: 'Commencer' }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    // Les cibles IA de Jambes (140 kg × 9) sont bien appliquées
+    expect(
+      (screen.getByRole('spinbutton', { name: 'Poids en kg' }) as HTMLInputElement).value,
+    ).toBe('140')
+    expect(
+      (
+        screen.getByRole('spinbutton', {
+          name: 'Nombre de répétitions',
+        }) as HTMLInputElement
+      ).value,
+    ).toBe('9')
+
+    await user.click(screen.getByRole('button', { name: 'Valider' }))
+
+    // Écran de fin de séance : l'utilisateur voit clairement que la prochaine séance Haut est déjà générée !
+    expect(screen.getByText('Séance terminée')).toBeInTheDocument()
+    expect(screen.getByTestId('next-session-status')).toHaveTextContent(
+      'Prochaine séance Haut déjà générée',
+    )
+
+    // Enregistre la séance : Haut devient la séance du jour, déjà prête à 0ms sans nouvel appel API
+    await user.click(screen.getByRole('button', { name: 'Enregistrer la séance' }))
+    expect(screen.getByRole('heading', { level: 1, name: 'Haut' })).toBeInTheDocument()
+    expect(screen.getByText(/Prochaine séance Haut déjà générée/i)).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    // Quand l'utilisateur appuie ensuite sur Haut, Haut est déjà généré : seule la prochaine séance Jambes est pré-générée !
+    await user.click(screen.getByRole('button', { name: 'Haut' }))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    })
+    expect(requestedPrompts[2]).toContain('Séance cible à planifier maintenant : Jambes (Legs)')
+  })
+
+  it('permet de modifier soi-même son fichier .txt directement dans Bloc-notes et applique les changements', async () => {
+    const user = userEvent.setup()
+    useWorkoutStore.getState().clearApiKey()
+
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Bloc-notes' }))
+    const textarea = screen.getByRole('textbox', {
+      name: 'Contenu du bloc-notes .txt',
+    }) as HTMLTextAreaElement
+
+    const editedTxt = textarea.value.replace(
+      'Leg press :\n',
+      'Leg press :\n• 25/10/2026 : 150kg x 10, 10 (repos : 3min)\n',
+    )
+
+    fireEvent.change(textarea, { target: { value: editedTxt } })
+    expect(screen.getByText('Non enregistré')).toBeInTheDocument()
+
+    // Enregistre directement depuis la barre du haut
+    await user.click(screen.getByRole('button', { name: 'Enregistrer' }))
+    await waitFor(() => {
+      expect(screen.queryByText('Non enregistré')).not.toBeInTheDocument()
+    })
+    expect(screen.getByText(/Modifications enregistrées/i)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Retour' }))
+    await user.click(screen.getByRole('button', { name: 'Jambes' }))
+    await user.click(screen.getByRole('button', { name: 'Commencer' }))
+
+    // La nouvelle charge 150 kg modifiée à la main dans le .txt est immédiatement prise en compte (+1 rep DDP -> 11)
+    expect(
+      (screen.getByRole('spinbutton', { name: 'Poids en kg' }) as HTMLInputElement).value,
+    ).toBe('150')
+    expect(
+      (
+        screen.getByRole('spinbutton', {
+          name: 'Nombre de répétitions',
+        }) as HTMLInputElement
+      ).value,
+    ).toBe('11')
   })
 })

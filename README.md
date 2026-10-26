@@ -37,6 +37,6 @@ npm run preview
   - Exercices polyarticulaires : fourchette `8–12` reps (hausse de poids dès 12 reps en Série 1, sinon `+1 rep`).
   - Exercices d’isolation : fourchette `12–15` reps (hausse de poids dès 15 reps, sinon `+1 rep`).
   - Conservation automatique des séries d’échauffement et gestion du tag `(échec)`.
-- **Coach Gemini IA** : utilise strictement **`gemini-3.8-flash`** avec `thinkingLevel: "high"` (compatible clés `AQ.…` et `AIza…`).
-- **Synchronisation Bloc-notes `.txt`** : exporte à tout moment l’intégralité de ton fichier bloc-notes (avec ton prompt DDP intact et les nouveaux `(Objectif)` en haut) ou colle une mise à jour.
+- **Coach Gemini IA & Pré-génération** : utilise strictement **`gemini-3.8-flash`** avec `thinkingLevel: "HIGH"` (compatible clés fraîchement créées `AIza…` Google AI Studio / Cloud et `AQ.…` Vertex AI Express avec bascule multi-endpoint et file séquentielle anti-429). En appuyant sur **Jambes** (ou **Haut**), l’application génère la séance en cours si elle ne l’était pas encore et pré-génère en tâche de fond la prochaine séance opposée (**Up** / **Jambes**) pour qu’elle soit immédiatement prête à la fin de l’entraînement.
+- **Édition directe & Synchronisation Bloc-notes `.txt`** : modifie librement tes exercices, charges, commentaires ou consignes personnelles directement dans l’éditeur `.txt` (`Enregistrer`, `Ctrl/Cmd+S` ou sauvegarde automatique au retour), importe ou exporte ton fichier complet sans perte.
 - **Courbes de progrès & Minuteur de repos** : graphique Charge max / 1RM estimé et minuteur basé sur l’horloge réelle (ne dérive pas écran verrouillé).
