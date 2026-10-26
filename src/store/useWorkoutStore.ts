@@ -13,9 +13,13 @@ import {
 import {
   GEMINI_MODEL,
   analyzeStatsWithGemini,
+  buildSectionPlanFingerprint,
   buildStatsFingerprint,
   generateGeminiSessionPlan,
+  isGeminiPlanFresh,
   parseWorkoutTextWithGemini,
+  resetGeminiClientState,
+  sanitizeApiKey,
 } from '../core/gemini'
 import { hasUnrecognizedWorkoutText, parseNotepad } from '../core/parser'
 import { computeSetRestDuration, getOptimalExtraRestSeconds } from '../core/restScience'
@@ -50,6 +54,23 @@ export interface UndoSnapshot {
   sessionPhase: SessionPhase
   cursor: StepCursor
   restTimer: RestTimerState | null
+}
+
+let storeEpoch = 0
+const inFlightCoachBySection: Partial<Record<SectionId, Promise<void>>> = {}
+
+function clearInFlightCoachTracking(): void {
+  delete inFlightCoachBySection.up
+  delete inFlightCoachBySection.legs
+}
+
+function hasSectionHistory(exercises: readonly Exercise[], section: SectionId): boolean {
+  return exercises.some(
+    (ex) =>
+      ex.section === section &&
+      ex.active &&
+      ex.entries.some((entry) => !entry.skipOnly && entry.sets.length > 0),
+  )
 }
 
 function cloneDraft(draft: ActiveDraft): ActiveDraft {
@@ -247,7 +268,7 @@ function createInitialData() {
   }
 
   const settings: AppSettings = {
-    apiKey: EXAMPLE_API_KEY,
+    apiKey: sanitizeApiKey(EXAMPLE_API_KEY),
     geminiModel: GEMINI_MODEL,
     theme: 'light',
     soundEnabled: false,
@@ -279,12 +300,17 @@ export interface SaveWorkoutSummary {
   totalWorkSeconds: number
   totalRestSeconds: number
   nextRecommended: SectionId
+  nextAlreadyGenerated: boolean
 }
 
 export interface SmartImportResult {
   usedAi: boolean
   exercisesCount: number
   entriesCount: number
+}
+
+export interface ImportNotepadOptions {
+  preserveCustomPreamble?: boolean
 }
 
 export interface WorkoutStoreState {
@@ -300,9 +326,12 @@ export interface WorkoutStoreState {
   undoStack: UndoSnapshot[]
   settings: AppSettings
   aiLoading: boolean
+  aiGeneratingSections: Record<SectionId, boolean>
   aiStatsLoading: boolean
   aiStatsError: string | null
   aiError: string | null
+  lastToast: string | null
+  setLastToast: (msg: string | null) => void
 
   selectSection: (section: SectionId) => void
   startWorkout: () => void
@@ -326,12 +355,19 @@ export interface WorkoutStoreState {
   discardActiveWorkout: () => void
   getExercisesWithLiveProgress: () => Exercise[]
 
-  askGeminiCoach: (section: SectionId) => Promise<void>
+  askGeminiCoach: (
+    section: SectionId,
+    options?: { priority?: 'high' | 'normal' },
+  ) => Promise<void>
+  ensureSessionPlansGenerated: (primarySection: SectionId) => Promise<void>
   refreshAiStats: (force?: boolean) => Promise<void>
   deleteHistoryEntry: (exerciseId: string, entryId: string) => void
   deleteCompletedSession: (sessionId: string) => void
 
-  importNotepadSmart: (rawText: string) => Promise<SmartImportResult>
+  importNotepadSmart: (
+    rawText: string,
+    options?: ImportNotepadOptions,
+  ) => Promise<SmartImportResult>
   resetToDefaultNotepad: () => void
 
   adjustRestTimer: (deltaSeconds: number) => void
@@ -344,29 +380,40 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
     (set, get) => ({
       ...createInitialData(),
       aiLoading: false,
+      aiGeneratingSections: { up: false, legs: false },
       aiStatsLoading: false,
       aiStatsError: null,
       aiError: null,
+      lastToast: null,
+      setLastToast: (msg) => set({ lastToast: msg }),
 
       selectSection: (section) => {
         const state = get()
-        if (state.activeDraft.section === section) return
-        const plan = state.coachPlans[section] ?? buildDdpSessionPlan(state.exercises, section)
-        set({
-          aiError: null,
-          sessionPhase: 'idle',
-          cursor: { exerciseIdx: 0, setIdx: 0 },
-          restTimer: null,
-          undoStack: [],
-          activeDraft: {
-            section,
-            date: todayISODate(),
-            startedAt: null,
-            phaseStartedAt: null,
-            pendingRestSeconds: null,
-            logs: buildDraftLogsForSection(state.exercises, section, plan),
-          },
-        })
+        if (state.activeDraft.section !== section) {
+          const plan = state.coachPlans[section] ?? buildDdpSessionPlan(state.exercises, section)
+          set({
+            aiError: null,
+            sessionPhase: 'idle',
+            cursor: { exerciseIdx: 0, setIdx: 0 },
+            restTimer: null,
+            undoStack: [],
+            activeDraft: {
+              section,
+              date: todayISODate(),
+              startedAt: null,
+              phaseStartedAt: null,
+              pendingRestSeconds: null,
+              logs: buildDraftLogsForSection(state.exercises, section, plan),
+            },
+          })
+        } else if (state.aiError) {
+          set({ aiError: null })
+        }
+
+        // Quand on appuie sur Jambes (ou Haut) :
+        // 1. Génère cette séance si elle n'a pas déjà été générée dans le passé
+        // 2. Pré-génère la prochaine séance opposée (ex: Up quand on presse Jambes) en tâche de fond !
+        void get().ensureSessionPlansGenerated(section)
       },
 
       startWorkout: () => {
@@ -381,12 +428,6 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           0,
           0,
         )
-
-        const hasPastHistory = activeExercises.some((ex) =>
-          ex.entries.some((entry) => !entry.skipOnly && entry.sets.length > 0),
-        )
-        const hasApiKey = state.settings.apiKey.trim().length > 0
-        const alreadyGemini = state.coachPlans[section]?.source === 'gemini'
         const now = Date.now()
 
         set({
@@ -400,9 +441,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           },
         })
 
-        if (hasPastHistory && hasApiKey && !alreadyGemini && !state.aiLoading) {
-          void get().askGeminiCoach(section)
-        }
+        void get().ensureSessionPlansGenerated(section)
       },
 
       exitWorkout: () => {
@@ -838,15 +877,37 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             ),
           }))
 
-        const upPlan = buildDdpSessionPlan(nextExercises, 'up')
-        const legsPlan = buildDdpSessionPlan(nextExercises, 'legs')
+        // Préserve le plan Gemini déjà pré-généré pour la séance opposée (ex: Up pré-généré pendant Jambes) !
+        const otherSection: SectionId = section === 'legs' ? 'up' : 'legs'
+        const updatedCompletedSectionPlan = buildDdpSessionPlan(nextExercises, section)
+        const existingOtherPlan = state.coachPlans[otherSection]
+        const preservedOtherPlan = isGeminiPlanFresh(
+          existingOtherPlan,
+          nextExercises,
+          otherSection,
+          state.preamble,
+        )
+          ? existingOtherPlan
+          : buildDdpSessionPlan(nextExercises, otherSection)
+
+        const nextCoachPlans: Record<SectionId, CoachSessionPlan> =
+          section === 'legs'
+            ? { legs: updatedCompletedSectionPlan, up: preservedOtherPlan }
+            : { up: updatedCompletedSectionPlan, legs: preservedOtherPlan }
+
         const { recommended } = getRecommendedSection(nextExercises)
-        const nextPlan = recommended === 'legs' ? legsPlan : upPlan
+        const nextPlan = nextCoachPlans[recommended]
+        const nextAlreadyGenerated = isGeminiPlanFresh(
+          nextPlan,
+          nextExercises,
+          recommended,
+          state.preamble,
+        )
 
         set({
           exercises: nextExercises,
           completedSessions: [sessionRecord, ...state.completedSessions],
-          coachPlans: { up: upPlan, legs: legsPlan },
+          coachPlans: nextCoachPlans,
           sessionPhase: 'idle',
           cursor: { exerciseIdx: 0, setIdx: 0 },
           restTimer: null,
@@ -869,52 +930,143 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           totalWorkSeconds,
           totalRestSeconds,
           nextRecommended: recommended,
+          nextAlreadyGenerated,
         }
       },
 
-      askGeminiCoach: async (section) => {
+      askGeminiCoach: async (section, options = {}) => {
         const state = get()
-        if (!state.settings.apiKey.trim()) return
-        set({ aiLoading: true, aiError: null })
-        try {
-          const plan = await generateGeminiSessionPlan({
-            section,
-            exercises: state.exercises,
-            preamble: state.preamble,
-            settings: state.settings,
-          })
-          const latestState = get()
-          const updatedPlans = { ...latestState.coachPlans, [section]: plan }
-          const nextDraft =
-            latestState.activeDraft.section === section
-              ? {
-                  ...latestState.activeDraft,
-                  logs: buildDraftLogsForSection(
-                    latestState.exercises,
-                    section,
-                    plan,
-                    latestState.activeDraft.logs,
-                  ),
-                }
-              : latestState.activeDraft
+        if (!sanitizeApiKey(state.settings.apiKey)) return
 
-          set({
-            coachPlans: updatedPlans,
-            activeDraft: nextDraft,
-            aiLoading: false,
-            aiError: null,
-          })
-        } catch (err) {
-          set({
-            aiLoading: false,
-            aiError: err instanceof Error ? err.message : 'Erreur Gemini.',
-          })
+        const existingPromise = inFlightCoachBySection[section]
+        if (existingPromise) {
+          return existingPromise
         }
+
+        const myEpoch = storeEpoch
+        const requestFingerprint = buildSectionPlanFingerprint(
+          state.exercises,
+          section,
+          state.preamble,
+        )
+
+        const nextGenState = {
+          ...state.aiGeneratingSections,
+          [section]: true,
+        }
+        set({
+          aiGeneratingSections: nextGenState,
+          aiLoading: true,
+          aiError: null,
+        })
+
+        const taskPromise = (async () => {
+          try {
+            const plan = await generateGeminiSessionPlan({
+              section,
+              exercises: state.exercises,
+              preamble: state.preamble,
+              settings: state.settings,
+              priority: options.priority ?? 'normal',
+            })
+
+            if (storeEpoch !== myEpoch) return
+
+            const latestState = get()
+            const currentFp = buildSectionPlanFingerprint(
+              latestState.exercises,
+              section,
+              latestState.preamble,
+            )
+            // N'écrase pas si l'historique de cette section a changé entre-temps
+            if (currentFp !== requestFingerprint) {
+              return
+            }
+
+            const updatedPlans = { ...latestState.coachPlans, [section]: plan }
+            const nextDraft =
+              latestState.activeDraft.section === section
+                ? {
+                    ...latestState.activeDraft,
+                    logs: buildDraftLogsForSection(
+                      latestState.exercises,
+                      section,
+                      plan,
+                      latestState.activeDraft.logs,
+                    ),
+                  }
+                : latestState.activeDraft
+
+            set({
+              coachPlans: updatedPlans,
+              activeDraft: nextDraft,
+              aiError: null,
+            })
+          } catch (err) {
+            if (storeEpoch !== myEpoch) return
+            set({
+              aiError: err instanceof Error ? err.message : 'Erreur Gemini.',
+            })
+          } finally {
+            delete inFlightCoachBySection[section]
+            if (storeEpoch === myEpoch) {
+              const current = get()
+              const updatedGenerating = {
+                ...current.aiGeneratingSections,
+                [section]: false,
+              }
+              set({
+                aiGeneratingSections: updatedGenerating,
+                aiLoading: updatedGenerating.up || updatedGenerating.legs,
+              })
+            }
+          }
+        })()
+
+        inFlightCoachBySection[section] = taskPromise
+        return taskPromise
+      },
+
+      ensureSessionPlansGenerated: async (primarySection) => {
+        const state = get()
+        if (!sanitizeApiKey(state.settings.apiKey)) return
+
+        const nextSection: SectionId = primarySection === 'legs' ? 'up' : 'legs'
+        const tasks: Promise<void>[] = []
+
+        // Si la séance demandée (ex: Jambes) n'était pas déjà générée dans le passé, on la génère d'abord
+        if (
+          hasSectionHistory(state.exercises, primarySection) &&
+          !isGeminiPlanFresh(
+            state.coachPlans[primarySection],
+            state.exercises,
+            primarySection,
+            state.preamble,
+          )
+        ) {
+          tasks.push(get().askGeminiCoach(primarySection, { priority: 'high' }))
+        }
+
+        // Et on pré-génère automatiquement la prochaine séance opposée (ex: Up quand on presse Jambes)
+        // pour qu'elle s'ouvre instantanément et soit déjà prête en fin de séance !
+        if (
+          hasSectionHistory(state.exercises, nextSection) &&
+          !isGeminiPlanFresh(
+            state.coachPlans[nextSection],
+            state.exercises,
+            nextSection,
+            state.preamble,
+          )
+        ) {
+          tasks.push(get().askGeminiCoach(nextSection, { priority: 'normal' }))
+        }
+
+        await Promise.all(tasks)
       },
 
       refreshAiStats: async (force = false) => {
         const state = get()
-        const apiKey = state.settings.apiKey.trim()
+        const apiKey = sanitizeApiKey(state.settings.apiKey)
         if (!apiKey || state.aiStatsLoading) return
 
         const liveExercises = get().getExercisesWithLiveProgress()
@@ -946,8 +1098,22 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             ? { ...ex, entries: ex.entries.filter((e) => e.id !== entryId) }
             : ex,
         )
-        const upPlan = buildDdpSessionPlan(nextExercises, 'up')
-        const legsPlan = buildDdpSessionPlan(nextExercises, 'legs')
+        const upPlan = isGeminiPlanFresh(
+          state.coachPlans.up,
+          nextExercises,
+          'up',
+          state.preamble,
+        )
+          ? state.coachPlans.up
+          : buildDdpSessionPlan(nextExercises, 'up')
+        const legsPlan = isGeminiPlanFresh(
+          state.coachPlans.legs,
+          nextExercises,
+          'legs',
+          state.preamble,
+        )
+          ? state.coachPlans.legs
+          : buildDdpSessionPlan(nextExercises, 'legs')
         const section = state.activeDraft.section
         const activePlan = section === 'legs' ? legsPlan : upPlan
         set({
@@ -971,35 +1137,60 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         }))
       },
 
-      importNotepadSmart: async (rawText) => {
+      importNotepadSmart: async (rawText, options = {}) => {
         const state = get()
-        const parsed = parseNotepad(rawText)
+        const parsed = parseNotepad(rawText, {
+          preserveCustomPreamble: options.preserveCustomPreamble,
+        })
         const needsAi = hasUnrecognizedWorkoutText(rawText, parsed)
 
         let finalExercises = parsed.exercises
-        const finalPreamble = parsed.preamble || DEFAULT_NOTEPAD_PREAMBLE
+        const finalPreamble = options.preserveCustomPreamble
+          ? parsed.preamble
+          : parsed.preamble || DEFAULT_NOTEPAD_PREAMBLE
         let usedAi = false
 
         if (needsAi) {
-          if (!state.settings.apiKey.trim()) {
+          const cleanKey = sanitizeApiKey(state.settings.apiKey)
+          if (!cleanKey) {
             throw new Error(
-              'Format libre non reconnu : renseigne ta clé Gemini dans Réglages pour l’extraction IA.',
+              'Format libre non reconnu : renseigne ta clé Gemini dans Réglages ou utilise le format « Nom de l’exercice : • poids x reps ».',
             )
           }
           set({ aiLoading: true, aiError: null })
           try {
             finalExercises = await parseWorkoutTextWithGemini({
               rawText,
-              apiKey: state.settings.apiKey,
+              apiKey: cleanKey,
             })
             usedAi = true
           } finally {
-            set({ aiLoading: false })
+            const cur = get()
+            set({
+              aiLoading: cur.aiGeneratingSections.up || cur.aiGeneratingSections.legs,
+            })
           }
         }
 
-        const upPlan = buildDdpSessionPlan(finalExercises, 'up')
-        const legsPlan = buildDdpSessionPlan(finalExercises, 'legs')
+        // Conserve tout plan Gemini dont la section n'a pas été modifiée dans le .txt
+        const upPlan = isGeminiPlanFresh(
+          state.coachPlans.up,
+          finalExercises,
+          'up',
+          finalPreamble,
+        )
+          ? state.coachPlans.up
+          : buildDdpSessionPlan(finalExercises, 'up')
+
+        const legsPlan = isGeminiPlanFresh(
+          state.coachPlans.legs,
+          finalExercises,
+          'legs',
+          finalPreamble,
+        )
+          ? state.coachPlans.legs
+          : buildDdpSessionPlan(finalExercises, 'legs')
+
         const { recommended } = getRecommendedSection(finalExercises)
         const activePlan = recommended === 'legs' ? legsPlan : upPlan
         const entriesCount = finalExercises.reduce((acc, ex) => acc + ex.entries.length, 0)
@@ -1024,6 +1215,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           },
         })
 
+        // Régénère en tâche de fond les séances impactées si une clé API est présente
+        if (sanitizeApiKey(state.settings.apiKey)) {
+          void get().ensureSessionPlansGenerated(recommended)
+        }
+
         return {
           usedAi,
           exercisesCount: finalExercises.length,
@@ -1032,12 +1228,19 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       },
 
       resetToDefaultNotepad: () => {
+        storeEpoch += 1
+        clearInFlightCoachTracking()
+        resetGeminiClientState()
         const fresh = createInitialData()
         set({
           ...fresh,
           settings: { ...get().settings, geminiModel: GEMINI_MODEL, soundEnabled: false },
+          aiLoading: false,
+          aiGeneratingSections: { up: false, legs: false },
+          aiStatsLoading: false,
           aiError: null,
           aiStatsError: null,
+          lastToast: null,
         })
       },
 
@@ -1061,8 +1264,12 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       },
 
       updateSettings: (patch) => {
+        const cleanedPatch =
+          patch.apiKey !== undefined
+            ? { ...patch, apiKey: sanitizeApiKey(patch.apiKey) }
+            : patch
         set((state) => ({
-          settings: { ...state.settings, ...patch, geminiModel: GEMINI_MODEL },
+          settings: { ...state.settings, ...cleanedPatch, geminiModel: GEMINI_MODEL },
           ...(patch.apiKey !== undefined
             ? { aiStatsError: null, aiError: null }
             : {}),
@@ -1072,6 +1279,8 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       clearApiKey: () => {
         set((state) => ({
           settings: { ...state.settings, apiKey: '' },
+          aiError: null,
+          aiStatsError: null,
         }))
       },
     }),
@@ -1079,12 +1288,14 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       name: STORAGE_KEY,
       merge: (persistedState, currentState) => {
         const persisted = (persistedState ?? {}) as Partial<WorkoutStoreState>
+        const rawKey = persisted.settings?.apiKey ?? currentState.settings.apiKey
         return {
           ...currentState,
           ...persisted,
           settings: {
             ...currentState.settings,
             ...(persisted.settings ?? {}),
+            apiKey: sanitizeApiKey(rawKey),
             geminiModel: GEMINI_MODEL,
             soundEnabled: false,
           },

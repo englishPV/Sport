@@ -1,26 +1,57 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { ArrowLeft, Eye, EyeOff, Loader2, Moon, Sun, Trash2, Wifi } from 'lucide-react'
-import { GEMINI_MODEL, GEMINI_THINKING_LEVEL, testGeminiConnection } from '../core/gemini'
+import {
+  GEMINI_MODEL,
+  GEMINI_THINKING_LEVEL,
+  detectApiProvider,
+  sanitizeApiKey,
+  testGeminiConnection,
+} from '../core/gemini'
 import { useWorkoutStore } from '../store/useWorkoutStore'
 
 export function SettingsView({ onBack }: { onBack: () => void }) {
   const settings = useWorkoutStore((s) => s.settings)
+  const activeDraft = useWorkoutStore((s) => s.activeDraft)
   const updateSettings = useWorkoutStore((s) => s.updateSettings)
   const clearApiKey = useWorkoutStore((s) => s.clearApiKey)
+  const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
 
+  const initialKeyRef = useRef(settings.apiKey)
   const [showKey, setShowKey] = useState(false)
   const [testing, setTesting] = useState(false)
   const [status, setStatus] = useState<{ ok: boolean; message: string } | null>(null)
 
+  const cleanedKey = sanitizeApiKey(settings.apiKey)
+  const detectedProvider = cleanedKey ? detectApiProvider(cleanedKey) : null
+
   const handleTest = async () => {
+    const keyToTest = sanitizeApiKey(settings.apiKey)
+    if (keyToTest !== settings.apiKey) {
+      updateSettings({ apiKey: keyToTest })
+    }
     setTesting(true)
     setStatus(null)
     try {
-      const res = await testGeminiConnection(settings.apiKey)
+      const res = await testGeminiConnection(keyToTest)
       setStatus(res)
+      if (res.ok) {
+        initialKeyRef.current = keyToTest
+        void ensureSessionPlansGenerated(activeDraft.section)
+      }
     } finally {
       setTesting(false)
     }
+  }
+
+  const handleBack = () => {
+    const clean = sanitizeApiKey(settings.apiKey)
+    if (clean !== settings.apiKey) {
+      updateSettings({ apiKey: clean })
+    }
+    if (clean && clean !== initialKeyRef.current) {
+      void ensureSessionPlansGenerated(activeDraft.section)
+    }
+    onBack()
   }
 
   return (
@@ -28,7 +59,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
       <div className="flex items-center justify-between">
         <button
           type="button"
-          onClick={onBack}
+          onClick={handleBack}
           aria-label="Retour"
           className="tap flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900"
         >
@@ -51,10 +82,10 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
             type={showKey ? 'text' : 'password'}
             value={settings.apiKey}
             onChange={(e) => {
-              updateSettings({ apiKey: e.target.value })
+              updateSettings({ apiKey: sanitizeApiKey(e.target.value) })
               setStatus(null)
             }}
-            placeholder="Clé API…"
+            placeholder="Clé API AIza… ou AQ.…"
             autoComplete="off"
             spellCheck={false}
             aria-label="Clé API Gemini"
@@ -72,10 +103,20 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
           </button>
         </div>
 
+        {detectedProvider && (
+          <p className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
+            Canal détecté :{' '}
+            <span className="font-semibold text-slate-600 dark:text-slate-300">
+              {detectedProvider.label}
+            </span>{' '}
+            · secours multi-endpoint actif
+          </p>
+        )}
+
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
-            disabled={!settings.apiKey.trim() || testing}
+            disabled={!cleanedKey || testing}
             onClick={() => void handleTest()}
             className="press flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 py-2.5 text-xs font-bold text-white shadow-sm shadow-blue-600/20 hover:bg-blue-700 disabled:opacity-40 disabled:shadow-none"
           >
@@ -88,6 +129,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
             disabled={!settings.apiKey}
             onClick={() => {
               clearApiKey()
+              initialKeyRef.current = ''
               setStatus(null)
             }}
             className="press flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 py-2.5 text-xs font-bold text-slate-600 hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-800 dark:text-slate-300 dark:hover:border-slate-700 dark:hover:bg-slate-800"

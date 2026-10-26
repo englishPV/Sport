@@ -74,6 +74,8 @@ export interface CoachSessionPlan {
   generatedAt: number
   source: 'ddp' | 'gemini'
   model: string | null
+  /** Empreinte de l'historique de la section au moment où le plan a été généré */
+  fingerprint?: string
   summaryLines: string[]
   exercises: Record<string, ExercisePlan>
 }

@@ -133,7 +133,9 @@ function detectSectionHeader(line: string): SectionId | null {
 function isPromptHeading(name: string): boolean {
   if (name.length > 65 || name.includes(',')) return true
   const norm = normalizeName(name)
-  return /^(regle|format|consigne|objectif|prompt|instruction|aujourd hui|pour chaque)\b/.test(norm)
+  return /^(regles?|formats?|consignes?|objectifs?|prompts?|instructions?|aujourd hui|pour chaque|profil|notes?|rappels?|priorites?|contexte|attention|important|remarques?)\b/.test(
+    norm,
+  )
 }
 
 interface HeaderMatch {
@@ -623,7 +625,15 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
 /* Parsing complet du bloc-notes                                              */
 /* -------------------------------------------------------------------------- */
 
-export function parseNotepad(rawText: string): ParsedNotepad {
+export interface ParseNotepadOptions {
+  /** Si true, respecte un préambule volontairement vidé par l'utilisateur au lieu de réinjecter le défaut */
+  preserveCustomPreamble?: boolean
+}
+
+export function parseNotepad(
+  rawText: string,
+  options: ParseNotepadOptions = {},
+): ParsedNotepad {
   const rawLines = rawText.split(/\r?\n/)
   const preambleLines: string[] = []
   const exercises: Exercise[] = []
@@ -741,45 +751,45 @@ export function parseNotepad(rawText: string): ParsedNotepad {
       if (ex.archived) {
         ex.active = false
       } else if (hasDatedExercises) {
-        ex.active = ex.entries.some((entry) => entry.date !== null && !entry.skipOnly)
+        ex.active =
+          ex.entries.length === 0 ||
+          ex.entries.some((entry) => entry.date !== null && !entry.skipOnly)
       }
     }
   }
 
-  const preamble = preambleLines.join('\n').trim() || DEFAULT_NOTEPAD_PREAMBLE
+  const rawPreamble = preambleLines.join('\n').trim()
+  const preamble = options.preserveCustomPreamble
+    ? rawPreamble
+    : rawPreamble || DEFAULT_NOTEPAD_PREAMBLE
 
   return { preamble, exercises }
 }
 
 /**
- * Détecte si un texte collé contient des exercices ou séries en langage naturel
- * non reconnus par le parseur déterministe (nécessitant l'analyse IA Gemini).
+ * Détecte si un texte collé est uniquement de la prose libre non structurée
+ * (zéro série reconnue par le parseur déterministe) et nécessite l'extraction IA.
+ * Ne bloque jamais un vrai fichier .txt contenant déjà des exercices et séries valides.
  */
-export function hasUnrecognizedWorkoutText(rawText: string, parsed: ParsedNotepad): boolean {
+export function hasUnrecognizedWorkoutText(
+  rawText: string,
+  parsed: ParsedNotepad = parseNotepad(rawText),
+): boolean {
   const trimmed = rawText.trim()
   if (!trimmed) return false
 
-  // Aucun exercice reconnu du tout alors qu'il y a du texte
+  if (parsed.exercises.length === 0) {
+    return true
+  }
+
   const totalRealEntries = parsed.exercises.reduce(
     (sum, ex) => sum + ex.entries.filter((e) => !e.skipOnly && e.sets.length > 0).length,
     0,
   )
-  if (parsed.exercises.length === 0 || totalRealEntries === 0) {
-    return true
-  }
 
-  // Ou présence de lignes contenant des chiffres + termes de séries/poids qui sont tombées en skipOnly
-  for (const ex of parsed.exercises) {
-    for (const entry of ex.entries) {
-      if (!entry.skipOnly) continue
-      const noteNorm = normalizeName(entry.note)
-      const looksLikeUnparsedSets =
-        /\d/.test(noteNorm) &&
-        /\b(kg|kilo|kilos|rep|reps|repetition|repetitions|serie|series|fois)\b/.test(noteNorm)
-      if (looksLikeUnparsedSets) {
-        return true
-      }
-    }
+  // Si aucune série valide n'a été reconnue alors que les blocs contiennent du texte brut
+  if (totalRealEntries === 0 && parsed.exercises.some((ex) => ex.entries.length > 0)) {
+    return true
   }
 
   return false
@@ -930,7 +940,8 @@ export function exportNotepad(params: {
   includeObjectives?: boolean
 }): string {
   const { preamble, exercises, plan, planDateIso, includeObjectives = true } = params
-  const lines: string[] = [preamble.trim(), '', '']
+  const trimmedPreamble = preamble.trim()
+  const lines: string[] = trimmedPreamble ? [trimmedPreamble, '', ''] : []
 
   const upExercises = exercises.filter((e) => e.section === 'up')
   const legsExercises = exercises.filter((e) => e.section === 'legs')
@@ -938,7 +949,7 @@ export function exportNotepad(params: {
   const renderExerciseBlock = (ex: Exercise, isFirstUp: boolean) => {
     const prefix = isFirstUp ? 'Up ' : ''
     if (ex.archived) {
-      lines.push(`(${ex.name} :`)
+      lines.push(ex.entries.length === 0 ? `(${ex.name} :)` : `(${ex.name} :`)
     } else {
       lines.push(`${prefix}${ex.name} :`)
     }

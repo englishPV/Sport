@@ -14,9 +14,10 @@ import {
 import { HistoryValueInput } from '../components/HistoryValueInput'
 import { Popover, Toast, useDismiss } from '../components/motion'
 import { getRecommendedSection } from '../core/ddp'
+import { isGeminiPlanFresh } from '../core/gemini'
 import type { SectionId } from '../core/types'
 import { useNow } from '../hooks/useNow'
-import { useWorkoutStore } from '../store/useWorkoutStore'
+import { useWorkoutStore, type SaveWorkoutSummary } from '../store/useWorkoutStore'
 
 function formatClock(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds))
@@ -143,7 +144,9 @@ const STEPPER_BUTTON =
   'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-white/90 text-xl font-bold text-slate-700 shadow-sm transition duration-150 ease-smooth hover:bg-white hover:shadow active:scale-90 dark:bg-slate-900 dark:text-slate-200'
 
 export function WorkoutView() {
+  const preamble = useWorkoutStore((s) => s.preamble)
   const exercises = useWorkoutStore((s) => s.exercises)
+  const coachPlans = useWorkoutStore((s) => s.coachPlans)
   const activeDraft = useWorkoutStore((s) => s.activeDraft)
   const sessionPhase = useWorkoutStore((s) => s.sessionPhase)
   const cursor = useWorkoutStore((s) => s.cursor)
@@ -151,6 +154,8 @@ export function WorkoutView() {
   const undoStack = useWorkoutStore((s) => s.undoStack)
   const settings = useWorkoutStore((s) => s.settings)
   const aiLoading = useWorkoutStore((s) => s.aiLoading)
+  const aiGeneratingSections = useWorkoutStore((s) => s.aiGeneratingSections)
+  const aiError = useWorkoutStore((s) => s.aiError)
 
   const selectSection = useWorkoutStore((s) => s.selectSection)
   const startWorkout = useWorkoutStore((s) => s.startWorkout)
@@ -166,13 +171,15 @@ export function WorkoutView() {
   const updateDraftNote = useWorkoutStore((s) => s.updateDraftNote)
   const saveCompletedWorkout = useWorkoutStore((s) => s.saveCompletedWorkout)
   const discardActiveWorkout = useWorkoutStore((s) => s.discardActiveWorkout)
+  const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
   const adjustRestTimer = useWorkoutStore((s) => s.adjustRestTimer)
   const updateSettings = useWorkoutStore((s) => s.updateSettings)
 
   const [showExercisePicker, setShowExercisePicker] = useState(false)
   const [showChronoEditor, setShowChronoEditor] = useState(false)
   const [customChronoText, setCustomChronoText] = useState('')
-  const [savedToast, setSavedToast] = useState<string | null>(null)
+  const savedToast = useWorkoutStore((s) => s.lastToast)
+  const setSavedToast = useWorkoutStore((s) => s.setLastToast)
 
   const pickerAnchorRef = useRef<HTMLButtonElement>(null)
   const pickerPanelRef = useRef<HTMLDivElement>(null)
@@ -199,11 +206,37 @@ export function WorkoutView() {
     if (!savedToast) return
     const timer = window.setTimeout(() => setSavedToast(null), 4000)
     return () => window.clearTimeout(timer)
-  }, [savedToast])
+  }, [savedToast, setSavedToast])
 
   const section = activeDraft.section
+  const nextSection: SectionId = section === 'legs' ? 'up' : 'legs'
+  const currentSectionLabel = section === 'legs' ? 'Jambes' : 'Haut'
+  const nextSectionLabel = nextSection === 'legs' ? 'Jambes' : 'Haut'
   const activeExercises = exercises.filter((e) => e.section === section && e.active)
   const { recommended } = getRecommendedSection(exercises)
+
+  const hasApiKey = Boolean(settings.apiKey.trim())
+  const currentAlreadyGenerated = isGeminiPlanFresh(
+    coachPlans[section],
+    exercises,
+    section,
+    preamble,
+  )
+  const nextAlreadyGenerated = isGeminiPlanFresh(
+    coachPlans[nextSection],
+    exercises,
+    nextSection,
+    preamble,
+  )
+  const generatingCurrent = aiGeneratingSections[section]
+  const generatingNext = aiGeneratingSections[nextSection]
+
+  const formatSavedMessage = (summary: SaveWorkoutSummary) => {
+    const nextTitle = summary.nextRecommended === 'up' ? 'Haut' : 'Jambes'
+    return summary.nextAlreadyGenerated
+      ? `Séance enregistrée (${summary.validatedSets} séries) · Prochaine séance ${nextTitle} déjà générée`
+      : `Séance enregistrée (${summary.validatedSets} séries)`
+  }
 
   const tickerActive =
     (sessionPhase !== 'idle' && activeDraft.startedAt !== null) || restTimer !== null
@@ -308,13 +341,60 @@ export function WorkoutView() {
           })}
         </div>
 
+        {/* Statut discret de génération IA (séance actuelle & pré-génération de la suivante) */}
+        {(generatingCurrent ||
+          generatingNext ||
+          currentAlreadyGenerated ||
+          nextAlreadyGenerated ||
+          (aiError && hasApiKey)) && (
+          <div className="mt-4 min-h-[1.5rem]">
+            {generatingCurrent ? (
+              <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-indigo-500/10 px-3 py-1 text-xs font-semibold text-indigo-600 dark:text-indigo-300">
+                <Sparkles className="h-3.5 w-3.5 animate-pulse" />
+                Génération IA {currentSectionLabel}…
+              </span>
+            ) : generatingNext ? (
+              <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-indigo-500/10 px-3 py-1 text-xs font-semibold text-indigo-600 dark:text-indigo-300">
+                <Sparkles className="h-3.5 w-3.5 animate-pulse" />
+                {currentAlreadyGenerated
+                  ? `Prête (IA) · Préparation ${nextSectionLabel}…`
+                  : `Préparation prochaine séance ${nextSectionLabel}…`}
+              </span>
+            ) : aiError && hasApiKey && !currentAlreadyGenerated ? (
+              <button
+                type="button"
+                onClick={() => void ensureSessionPlansGenerated(section)}
+                className="tap inline-flex max-w-xs items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-500/15 dark:text-rose-300"
+              >
+                <span className="truncate">IA : {aiError}</span>
+                <span className="shrink-0 underline">Réessayer</span>
+              </button>
+            ) : currentAlreadyGenerated && nextAlreadyGenerated ? (
+              <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                <Check className="h-3.5 w-3.5" />
+                Prête (IA) · Prochaine {nextSectionLabel} déjà générée
+              </span>
+            ) : currentAlreadyGenerated ? (
+              <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                <Check className="h-3.5 w-3.5" />
+                Séance déjà générée par l&apos;IA
+              </span>
+            ) : nextAlreadyGenerated ? (
+              <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                <Check className="h-3.5 w-3.5" />
+                Prochaine séance {nextSectionLabel} déjà générée
+              </span>
+            ) : null}
+          </div>
+        )}
+
         <button
           type="button"
           onClick={() => {
             setSavedToast(null)
             startWorkout()
           }}
-          className="mt-10 w-full max-w-xs rounded-2xl bg-indigo-600 px-8 py-4 text-lg font-bold text-white shadow-lg shadow-indigo-600/25 transition-all duration-200 ease-smooth hover:-translate-y-0.5 hover:bg-indigo-500 hover:shadow-xl hover:shadow-indigo-600/30 active:translate-y-0 active:scale-[0.98]"
+          className="mt-8 w-full max-w-xs rounded-2xl bg-indigo-600 px-8 py-4 text-lg font-bold text-white shadow-lg shadow-indigo-600/25 transition-all duration-200 ease-smooth hover:-translate-y-0.5 hover:bg-indigo-500 hover:shadow-xl hover:shadow-indigo-600/30 active:translate-y-0 active:scale-[0.98]"
         >
           {validatedCount > 0 ? `Reprendre (${validatedCount}/${totalSetsCount})` : 'Commencer'}
         </button>
@@ -326,7 +406,7 @@ export function WorkoutView() {
               onClick={() => {
                 const summary = saveCompletedWorkout()
                 if (summary) {
-                  setSavedToast(`Séance enregistrée (${summary.validatedSets} séries)`)
+                  setSavedToast(formatSavedMessage(summary))
                 }
               }}
               className="tap text-emerald-600 hover:underline dark:text-emerald-400"
@@ -401,7 +481,11 @@ export function WorkoutView() {
         </button>
         {aiLoading && (
           <span
-            title="Gemini 3.8 Flash ajuste les cibles…"
+            title={
+              generatingCurrent
+                ? 'Gemini 3.8 Flash ajuste les cibles…'
+                : `Gemini 3.8 Flash pré-génère la prochaine séance ${nextSectionLabel}…`
+            }
             className="inline-flex animate-pop-in items-center text-indigo-500 dark:text-indigo-400"
           >
             <Sparkles className="h-3.5 w-3.5 animate-pulse" />
@@ -581,12 +665,39 @@ export function WorkoutView() {
           {validatedCount} séries · {formatClock(workoutElapsedSeconds)}
         </p>
 
+        {nextAlreadyGenerated ? (
+          <div
+            data-testid="next-session-status"
+            className="mt-4 inline-flex animate-pop-in items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3.5 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Prochaine séance {nextSectionLabel} déjà générée
+          </div>
+        ) : generatingNext ? (
+          <div
+            data-testid="next-session-status"
+            className="mt-4 inline-flex animate-fade-in items-center gap-1.5 rounded-full border border-indigo-500/25 bg-indigo-500/10 px-3.5 py-1.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300"
+          >
+            <Sparkles className="h-3.5 w-3.5 animate-pulse" />
+            Génération de la prochaine séance {nextSectionLabel}…
+          </div>
+        ) : aiError && hasApiKey ? (
+          <button
+            type="button"
+            onClick={() => void ensureSessionPlansGenerated(section)}
+            className="tap mt-4 inline-flex items-center gap-1.5 rounded-full border border-rose-500/25 bg-rose-500/10 px-3.5 py-1.5 text-xs font-semibold text-rose-600 dark:text-rose-300"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Générer la prochaine séance {nextSectionLabel}
+          </button>
+        ) : null}
+
         <button
           type="button"
           onClick={() => {
             const summary = saveCompletedWorkout()
             if (summary) {
-              setSavedToast(`Séance enregistrée (${summary.validatedSets} séries)`)
+              setSavedToast(formatSavedMessage(summary))
             }
           }}
           className="press mt-8 w-full max-w-xs animate-fade-up rounded-2xl bg-emerald-600 px-6 py-4 text-base font-bold text-white shadow-lg shadow-emerald-600/20 [animation-delay:120ms] hover:bg-emerald-500 hover:shadow-xl hover:shadow-emerald-600/25"
@@ -694,7 +805,7 @@ export function WorkoutView() {
                   setShowExercisePicker(false)
                   const summary = saveCompletedWorkout()
                   if (summary) {
-                    setSavedToast(`Séance enregistrée (${summary.validatedSets} séries)`)
+                    setSavedToast(formatSavedMessage(summary))
                   }
                 }}
                 className="w-full rounded-xl bg-emerald-500/10 px-3 py-1.5 text-center text-xs font-semibold text-emerald-700 transition-colors duration-200 hover:bg-emerald-500/20 dark:text-emerald-300"
