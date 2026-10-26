@@ -446,15 +446,13 @@ async function executeGenerateContentHttp(params: {
         const outcome = await sendOnce(endpoint, authMode, thinkingMode)
 
         if ('networkError' in outcome) {
-          if (outcome.aborted) {
-            throw new Error('Délai dépassé lors de la réponse Gemini (réessaie).')
-          }
           if (cachedRoute && cachedRoute.url === endpoint && cachedRoute.authMode === authMode) {
             workingRouteByKey.delete(cleanKey)
           }
           sawNetworkError = true
-          // Si l'en-tête x-goog-api-key a été bloqué par un preflight CORS navigateur,
-          // la boucle authIdx essaie immédiatement le mode `?key=` !
+          // Timeout (aborted), coupure réseau ou preflight CORS bloqué : on ne fait PAS
+          // échouer tout le test sur cette seule route. La boucle authIdx essaie
+          // immédiatement le mode `?key=`, puis les autres endpoints candidats.
           break
         }
 
@@ -521,9 +519,23 @@ async function executeGenerateContentHttp(params: {
           break
         }
 
-        // 5. Autre erreur non récupérable (ex: restriction Referrer explicite ou 429 après retries)
+        // 5. Quota `limit: 0` propre à un endpoint : inutile de retenter la même URL en `?key=`,
+        //    on passe directement à l'endpoint candidat suivant.
         if (errInfo.status === 429 && epIdx < endpoints.length - 1 && /limit:\s*0\b/i.test(errInfo.message)) {
           moveToNextEndpoint = true
+          break
+        }
+
+        // 6. 429 / 5xx persistant après les réessais internes : ne pas faire échouer tout le
+        //    test sur cette route. On laisse leur chance au mode d'auth puis aux autres endpoints
+        //    (surcharge/quota locale d'un endpoint Google souvent spécifique à une route).
+        if (
+          errInfo.status === 429 ||
+          errInfo.status === 500 ||
+          errInfo.status === 502 ||
+          errInfo.status === 503 ||
+          errInfo.status === 504
+        ) {
           break
         }
 
@@ -589,7 +601,10 @@ export async function testGeminiConnection(
         properties: { status: { type: 'STRING' } },
         required: ['status'],
       },
-      timeoutMs: 45_000,
+      // Le tier gratuit de gemini-3.8-flash (thinking HIGH) peut mettre 30-50 s à répondre :
+      // on laisse plus de marge qu'un simple ping, et un timeout bascule désormais sur
+      // les routes candidates au lieu d'échouer immédiatement.
+      timeoutMs: 60_000,
       priority: 'high',
     })
     return {
