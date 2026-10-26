@@ -373,7 +373,7 @@ async function executeGenerateContentHttp(params: {
     baseUrl: string,
     authMode: AuthTransportMode,
     thinkingMode: ThinkingMode,
-  ): Promise<{ response: Response } | { aborted: boolean; networkError: unknown }> => {
+  ): Promise<{ response: Response; clearTimer: () => void } | { aborted: boolean; networkError: unknown }>  => {
     const controller = new AbortController()
     let didTimeout = false
     const timer = setTimeout(() => {
@@ -406,11 +406,10 @@ async function executeGenerateContentHttp(params: {
         }),
         signal: controller.signal,
       })
-      return { response }
+      return { response, clearTimer: () => clearTimeout(timer) }
     } catch (networkError) {
-      return { aborted: didTimeout || controller.signal.aborted, networkError }
-    } finally {
       clearTimeout(timer)
+      return { aborted: didTimeout || controller.signal.aborted, networkError }
     }
   }
 
@@ -450,28 +449,37 @@ async function executeGenerateContentHttp(params: {
             workingRouteByKey.delete(cleanKey)
           }
           sawNetworkError = true
-          // Timeout (aborted), coupure réseau ou preflight CORS bloqué : on ne fait PAS
-          // échouer tout le test sur cette seule route. La boucle authIdx essaie
-          // immédiatement le mode `?key=`, puis les autres endpoints candidats.
+          if (outcome.aborted) {
+            moveToNextEndpoint = true;
+          }
           break
         }
 
-        const { response } = outcome
+        const { response, clearTimer } = outcome
         if (response.ok) {
           workingRouteByKey.set(cleanKey, {
             url: endpoint,
             authMode,
             thinkingMode,
           })
-          const data = (await response.json()) as RawGeminiResponse
-          return extractResponseText(data)
+          try {
+            const data = (await response.json()) as RawGeminiResponse
+            return extractResponseText(data)
+          } finally {
+            clearTimer()
+          }
         }
 
         if (cachedRoute && cachedRoute.url === endpoint && cachedRoute.authMode === authMode) {
           workingRouteByKey.delete(cleanKey)
         }
 
-        const errInfo = await readErrorDetails(response)
+        let errInfo;
+        try {
+          errInfo = await readErrorDetails(response)
+        } finally {
+          clearTimer()
+        }
         if (epIdx === 0 && primaryParsedError === null) {
           primaryParsedError = errInfo
         }
