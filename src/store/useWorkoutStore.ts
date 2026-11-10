@@ -1,5 +1,12 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist } from 'zustand/middleware'
+import { inferProfileFromPreamble, settleObjectives } from '../core/parser'
+import {
+  createMigratingStorage,
+  migratePersistedState,
+  SCHEMA_VERSION,
+  STORAGE_KEY,
+} from '../core/storage'
 import {
   DEFAULT_NOTEPAD_PREAMBLE,
   DEFAULT_NOTEPAD_TEXT,
@@ -40,7 +47,7 @@ import {
   type WorkoutSet,
 } from '../core/types'
 
-export const STORAGE_KEY = 'sport-ddp:v5'
+export { STORAGE_KEY }
 
 export type SessionPhase = 'idle' | 'working' | 'resting' | 'done'
 
@@ -273,8 +280,8 @@ function createInitialData() {
     theme: 'light',
     soundEnabled: false,
     vibrationEnabled: false,
-    profileHeightCm: 184,
-    profileWeightKg: 72,
+    profileHeightCm: 0,
+    profileWeightKg: 0,
   }
 
   return {
@@ -1141,6 +1148,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         const state = get()
         const parsed = parseNotepad(rawText, {
           preserveCustomPreamble: options.preserveCustomPreamble,
+          todayIso: todayISODate(),
         })
         const needsAi = hasUnrecognizedWorkoutText(rawText, parsed)
 
@@ -1195,7 +1203,18 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         const activePlan = recommended === 'legs' ? legsPlan : upPlan
         const entriesCount = finalExercises.reduce((acc, ex) => acc + ex.entries.length, 0)
 
+        const profile = inferProfileFromPreamble(finalPreamble)
+
         set({
+          ...(profile
+            ? {
+                settings: {
+                  ...get().settings,
+                  profileHeightCm: profile.heightCm,
+                  profileWeightKg: profile.weightKg,
+                },
+              }
+            : {}),
           preamble: finalPreamble,
           exercises: finalExercises,
           aiStats: null,
@@ -1286,12 +1305,20 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
     }),
     {
       name: STORAGE_KEY,
+      version: SCHEMA_VERSION,
+      storage: createJSONStorage(() => createMigratingStorage()),
+      // Reprend les données de l'ancienne clé (sport-ddp:v5) sans jamais la supprimer.
+      migrate: (persistedState) => migratePersistedState(persistedState, todayISODate()) as never,
       merge: (persistedState, currentState) => {
         const persisted = (persistedState ?? {}) as Partial<WorkoutStoreState>
         const rawKey = persisted.settings?.apiKey ?? currentState.settings.apiKey
         return {
           ...currentState,
           ...persisted,
+          exercises: settleObjectives(
+            persisted.exercises ?? currentState.exercises,
+            todayISODate(),
+          ),
           settings: {
             ...currentState.settings,
             ...(persisted.settings ?? {}),

@@ -16,6 +16,8 @@ export interface WorkoutSet {
   /** Cibles prévues au moment de la série */
   targetWeight?: number
   targetReps?: number
+  /** Commentaire propre à cette série, écrit juste à côté dans le bloc-notes */
+  note?: string
 }
 
 export interface ExerciseEntry {
@@ -34,6 +36,11 @@ export interface ExerciseEntry {
   wasObjective?: boolean
   /** Ligne purement textuelle (ex: séance sautée / commentaire seul) */
   skipOnly?: boolean
+  /**
+   * Ligne d'origine du bloc-notes. Tant qu'elle existe, l'export la réécrit telle quelle
+   * (commentaires à leur place). Absente pour les séances saisies dans l'application.
+   */
+  raw?: string
 }
 
 export interface Exercise {

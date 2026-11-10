@@ -68,6 +68,30 @@ describe.skipIf(!existsSync(REAL_FILE))('vrai bloc-notes local (non versionné)'
     expect(again.preamble).toBe(parsed.preamble)
   })
 
-  it.todo('export idempotent même avec des commentaires à parenthèses imbriquées')
-  it.todo('garde chaque commentaire à côté de la série concernée')
+  it('réécrit chaque ligne de séance telle quelle (commentaires à leur place)', () => {
+    const exported = exportNotepad({ preamble: parsed.preamble, exercises: parsed.exercises })
+    const bullets = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('•') && !/^•\s*\[[ xX]?\]$/.test(l))
+    expect(bullets.length).toBeGreaterThan(100)
+    // Le « ) » final d'un bloc archivé est remis par l'export : on compare sans lui.
+    const missing = bullets.filter((l) => !exported.includes(l.replace(/\)$/, '')))
+    expect(missing).toEqual([])
+  })
+
+  it('export idempotent', () => {
+    const once = exportNotepad({ preamble: parsed.preamble, exercises: parsed.exercises })
+    const again = parseNotepad(once)
+    expect(exportNotepad({ preamble: again.preamble, exercises: again.exercises })).toBe(once)
+  })
+
+  it('les objectifs du 09/11 comptent comme séances faites le 10/11', () => {
+    const settled = parseNotepad(text, { todayIso: '2026-11-10' })
+    const entries = settled.exercises.flatMap((e) => e.entries)
+    expect(entries.some((e) => e.wasObjective)).toBe(false)
+    expect(countSets(settled.exercises)).toBe(countSets(parsed.exercises))
+    const exported = exportNotepad({ preamble: settled.preamble, exercises: settled.exercises })
+    expect(exported.split('\n').filter((l) => l.startsWith('•') && /\(objectif\)/i.test(l))).toEqual([])
+  })
 })

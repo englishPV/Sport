@@ -3,13 +3,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { LEGACY_NOTEPAD_TEXT } from './core/__fixtures__/legacyNotepad'
 import { formatNumberFr } from './core/types'
 import { STORAGE_KEY, useWorkoutStore } from './store/useWorkoutStore'
 import { computePerfState } from './views/WorkoutView'
 
 const TEST_VERTEX_KEY = 'AQ.TestVertexExpressDummyKey0000'
 
-beforeEach(() => {
+beforeEach(async () => {
   window.scrollTo = vi.fn()
   vi.stubGlobal(
     'fetch',
@@ -38,6 +39,8 @@ beforeEach(() => {
   )
   localStorage.removeItem(STORAGE_KEY)
   useWorkoutStore.getState().resetToDefaultNotepad()
+  // Le modèle par défaut est vide : les tests d'interface tournent sur l'ancien jeu de données.
+  await useWorkoutStore.getState().importNotepadSmart(LEGACY_NOTEPAD_TEXT)
   useWorkoutStore.getState().updateSettings({ apiKey: TEST_VERTEX_KEY })
 })
 

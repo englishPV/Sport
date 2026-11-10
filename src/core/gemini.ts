@@ -906,7 +906,7 @@ export function buildCoachPromptForSection(params: {
 
   return `Tu es un coach scientifique expert en hypertrophie et biomécanique appliquant la Double Progression Dynamique (DDP).
 Date de référence : ${formatIsoToFr(todayISODate())}.
-Profil athlète : ${settings.profileHeightCm} cm, ${settings.profileWeightKg} kg — objectif hypertrophie naturelle.
+${settings.profileHeightCm > 0 && settings.profileWeightKg > 0 ? `Profil athlète : ${settings.profileHeightCm} cm, ${settings.profileWeightKg} kg — objectif hypertrophie naturelle.` : 'Objectif : hypertrophie naturelle.'}
 Séance cible à planifier maintenant : ${SECTION_LABELS[section].title} (cette séance peut être lancée aujourd'hui ou pré-générée à l'avance pour la prochaine venue à la salle : base-toi exclusivement sur l'historique de ${SECTION_LABELS[section].title} fourni ci-dessous).
 
 ${athleteRules ? `Consignes personnelles de l'athlète (issues de son fichier .txt) :\n${athleteRules}\n` : ''}RÈGLES DE PROGRAMMATION SCIENTIFIQUES & PRATIQUES :

@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_NOTEPAD_TEXT } from './defaultNotepad'
+import { LEGACY_NOTEPAD_TEXT as DEFAULT_NOTEPAD_TEXT } from './__fixtures__/legacyNotepad'
 
 const TEST_VERTEX_KEY = 'AQ.TestVertexExpressDummyKey0000'
 import {
   exportNotepad,
   hasUnrecognizedWorkoutText,
   parseEntryLine,
+  settleObjectives,
   parseNotepad,
 } from './parser'
 import { buildDdpSessionPlan, computeExerciseDdpPlan, getRecommendedSection } from './ddp'
@@ -166,7 +167,7 @@ describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
     const plan = buildDdpSessionPlan(parsed.exercises, 'legs')
     const exported = exportNotepad({
       preamble: parsed.preamble,
-      exercises: parsed.exercises,
+      exercises: settleObjectives(parsed.exercises, '2026-10-23'),
       plan,
       planDateIso: '2026-10-23',
       includeObjectives: true,
@@ -175,7 +176,8 @@ describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
     expect(exported).toContain('Soulevé de Terre Roumain :\n• 23/10/2026 (Objectif) : 24kg x 8-10')
     // Les anciens (Objectif) sur les séances déjà réalisées ont été nettoyés
     expect(exported).not.toContain('22/10/2026 (Objectif)')
-    expect(exported).toContain('• 22/10/2026 : 10kg x 12 | 22kg x 10 | 20kg x 12, 8 (échec)')
+    // ... et la ligne est réécrite telle que saisie, au caractère près
+    expect(exported).toContain('• 22/10/2026 : 10kg x 12 | 22kg x 10 | 20kg x 12, 8(échec) (repos : 2min30)')
   })
 })
 
