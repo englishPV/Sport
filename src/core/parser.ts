@@ -450,7 +450,10 @@ function markWarmupSets(sets: WorkoutSet[]): WorkoutSet[] {
 }
 
 export function parseEntryLine(rawLine: string): ExerciseEntry {
-  let working = rawLine.replace(/^[•\-*]\s*/, '').trim()
+  let working = rawLine
+    .replace(/^[•\-*]\s*/, '')
+    .replace(/^\[[ xX]?\]\s*/, '')
+    .trim()
   const collectedNotes: string[] = []
   let wasObjective = false
   let date: string | null = null
@@ -718,6 +721,9 @@ export function parseNotepad(
           inArchivedBlock = false
         }
       }
+
+      // Case à cocher vide laissée par l'appli de notes (`- [ ]`, `- [x]`) : aucune donnée
+      if (/^[•\-*]?\s*\[[ xX]?\]$/.test(lineContent)) continue
 
       if (/^[•\-*]/.test(lineContent)) {
         pendingBulletLines.push({ exercise: currentExercise, text: lineContent })
