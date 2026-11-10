@@ -26,6 +26,12 @@ import {
 export const GEMINI_MODEL = 'gemini-3.8-flash' as const
 export const GEMINI_THINKING_LEVEL = 'HIGH' as const
 
+/**
+ * Délai max d'une génération complète. Avec thinking HIGH sur tout l'historique du bloc-notes,
+ * gemini-3.8-flash peut dépasser 90 s : on laisse 3 min avant d'abandonner.
+ */
+const GENERATION_TIMEOUT_MS = 180_000
+
 export type ApiProviderKind = 'vertex_express' | 'ai_studio'
 
 type AuthTransportMode = 'header' | 'query'
@@ -104,6 +110,10 @@ function buildCandidateEndpoints(cleanKey: string): string[] {
     return [vertexBeta, vertexV1, aiStudioBeta, aiStudioAlpha]
   }
   return [aiStudioBeta, aiStudioAlpha, vertexBeta, vertexV1]
+}
+
+function endpointProvider(url: string): ApiProviderKind {
+  return url.includes('aiplatform.googleapis.com') ? 'vertex_express' : 'ai_studio'
 }
 
 /* -------------------------------------------------------------------------- */
@@ -278,10 +288,13 @@ async function readErrorDetails(response: Response): Promise<ParsedHttpError> {
   try {
     const errBody = (await response.json()) as RawGeminiResponse
     message = errBody.error?.message ?? ''
+    if (typeof errBody.error?.status === 'string') {
+      reason = errBody.error.status
+    }
     if (Array.isArray(errBody.error?.details)) {
       for (const detail of errBody.error.details) {
-        if (!reason && typeof detail.reason === 'string') {
-          reason = detail.reason
+        if (typeof detail.reason === 'string' && (!reason || reason === errBody.error?.status)) {
+          reason = reason && reason !== detail.reason ? `${detail.reason} ${reason}` : detail.reason
         }
         if (retryAfterMs === null && typeof detail.retryDelay === 'string') {
           const m = /^(\d+(?:\.\d+)?)s$/i.exec(detail.retryDelay.trim())
@@ -335,10 +348,19 @@ function isKeyOrEndpointMismatch(err: ParsedHttpError): boolean {
   return false
 }
 
+/**
+ * Traduit une erreur Google en message clair et actionnable (en français).
+ * Les cas fréquents avec une clé neuve sont explicitement expliqués.
+ */
 function formatFriendlyApiError(err: ParsedHttpError): string {
   const combined = `${err.reason} ${err.message}`
+  const detail = err.message ? ` (${err.message})` : ''
+
   if (/HTTP_REFERRER_BLOCKED|referer/i.test(combined)) {
     return 'Clé API restreinte par site web (retire la restriction HTTP Referrer dans Google AI Studio / Cloud).'
+  }
+  if (/limit:\s*0\b/i.test(err.message)) {
+    return `Quota gratuit nul pour ${GEMINI_MODEL} sur cette clé (limit: 0) : active la facturation du projet dans Google AI Studio, ou utilise une clé d'un projet facturé.`
   }
   if (err.status === 429 || /RESOURCE_EXHAUSTED|quota/i.test(combined)) {
     return err.message
@@ -348,7 +370,21 @@ function formatFriendlyApiError(err: ParsedHttpError): string {
   if (/API_KEY_INVALID|api key not valid|pass a valid api key/i.test(combined)) {
     return 'Clé API non reconnue par Google (vérifie que la clé complète est bien copiée sans caractère manquant).'
   }
-  const detail = err.message ? ` (${err.message})` : ''
+  if (/API_KEY_SERVICE_BLOCKED|SERVICE_DISABLED|has not been used in project|is disabled/i.test(combined)) {
+    return `L'API Gemini (Generative Language API) n'est pas autorisée pour cette clé. Crée une clé sur aistudio.google.com/apikey ou active cette API dans Google Cloud, et retire toute restriction d'API sur la clé.${detail}`
+  }
+  if (/location is not supported/i.test(combined)) {
+    return `Google refuse la requête depuis cette localisation pour ce projet.${detail}`
+  }
+  if (err.status === 401 || /API keys are not supported|UNAUTHENTICATED|CREDENTIALS_MISSING/i.test(combined)) {
+    return `Clé refusée par Google : utilise une clé Google AI Studio (AIza…) ou Vertex AI Express (AQ.…).${detail}`
+  }
+  if (err.status === 404) {
+    return `Modèle ${GEMINI_MODEL} introuvable pour cette clé (projet sans accès au modèle).${detail}`
+  }
+  if (err.status === 403) {
+    return `Accès refusé par Google pour cette clé (permissions ou restrictions d'API).${detail}`
+  }
   return `Erreur HTTP ${err.status}${detail}`
 }
 
@@ -361,6 +397,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function buildTimeoutMessage(timeoutMs: number): string {
+  return `Délai dépassé : Gemini (${GEMINI_MODEL} · ${GEMINI_THINKING_LEVEL}) n'a pas répondu en ${Math.round(
+    timeoutMs / 1000,
+  )} s. Réessaie dans un instant.`
+}
+
+type SendOutcome =
+  | { kind: 'response'; response: Response; clearTimer: () => void; timedOut: () => boolean }
+  | { kind: 'network'; timedOut: boolean; networkError: unknown }
+
 async function executeGenerateContentHttp(params: {
   cleanKey: string
   prompt: string
@@ -368,12 +414,13 @@ async function executeGenerateContentHttp(params: {
   timeoutMs: number
 }): Promise<string> {
   const { cleanKey, prompt, responseSchema, timeoutMs } = params
+  const keyProvider = detectApiProvider(cleanKey).kind
 
   const sendOnce = async (
     baseUrl: string,
     authMode: AuthTransportMode,
     thinkingMode: ThinkingMode,
-  ): Promise<{ response: Response; clearTimer: () => void } | { aborted: boolean; networkError: unknown }>  => {
+  ): Promise<SendOutcome> => {
     const controller = new AbortController()
     let didTimeout = false
     const timer = setTimeout(() => {
@@ -406,10 +453,15 @@ async function executeGenerateContentHttp(params: {
         }),
         signal: controller.signal,
       })
-      return { response, clearTimer: () => clearTimeout(timer) }
+      return {
+        kind: 'response',
+        response,
+        clearTimer: () => clearTimeout(timer),
+        timedOut: () => didTimeout,
+      }
     } catch (networkError) {
       clearTimeout(timer)
-      return { aborted: didTimeout || controller.signal.aborted, networkError }
+      return { kind: 'network', timedOut: didTimeout, networkError }
     }
   }
 
@@ -421,11 +473,13 @@ async function executeGenerateContentHttp(params: {
     : baseEndpoints
 
   let primaryParsedError: ParsedHttpError | null = null
+  let firstNativeError: ParsedHttpError | null = null
   let lastParsedError: ParsedHttpError | null = null
   let sawNetworkError = false
 
   for (let epIdx = 0; epIdx < endpoints.length; epIdx += 1) {
     const endpoint = endpoints[epIdx]
+    const isNativeEndpoint = endpointProvider(endpoint) === keyProvider
     const initialAuthModes: AuthTransportMode[] =
       cachedRoute && cachedRoute.url === endpoint
         ? [cachedRoute.authMode, ...(cachedRoute.authMode === 'header' ? (['query'] as const) : (['header'] as const))]
@@ -444,27 +498,36 @@ async function executeGenerateContentHttp(params: {
       while (true) {
         const outcome = await sendOnce(endpoint, authMode, thinkingMode)
 
-        if ('networkError' in outcome) {
+        if (outcome.kind === 'network') {
           if (cachedRoute && cachedRoute.url === endpoint && cachedRoute.authMode === authMode) {
             workingRouteByKey.delete(cleanKey)
           }
-          sawNetworkError = true
-          if (outcome.aborted) {
-            moveToNextEndpoint = true;
+          // Un vrai délai dépassé signifie que Google a accepté la requête mais réfléchit trop
+          // longtemps : inutile de relancer la même requête sur 3 autres routes (plusieurs minutes
+          // d'attente puis une erreur 401 trompeuse venant d'un endpoint d'un autre fournisseur).
+          if (outcome.timedOut) {
+            throw new Error(buildTimeoutMessage(timeoutMs))
           }
+          sawNetworkError = true
           break
         }
 
-        const { response, clearTimer } = outcome
+        const { response, clearTimer, timedOut } = outcome
         if (response.ok) {
-          workingRouteByKey.set(cleanKey, {
-            url: endpoint,
-            authMode,
-            thinkingMode,
-          })
           try {
             const data = (await response.json()) as RawGeminiResponse
-            return extractResponseText(data)
+            const text = extractResponseText(data)
+            workingRouteByKey.set(cleanKey, {
+              url: endpoint,
+              authMode,
+              thinkingMode,
+            })
+            return text
+          } catch (err) {
+            if (timedOut()) {
+              throw new Error(buildTimeoutMessage(timeoutMs))
+            }
+            throw err
           } finally {
             clearTimer()
           }
@@ -474,7 +537,7 @@ async function executeGenerateContentHttp(params: {
           workingRouteByKey.delete(cleanKey)
         }
 
-        let errInfo;
+        let errInfo: ParsedHttpError
         try {
           errInfo = await readErrorDetails(response)
         } finally {
@@ -482,6 +545,9 @@ async function executeGenerateContentHttp(params: {
         }
         if (epIdx === 0 && primaryParsedError === null) {
           primaryParsedError = errInfo
+        }
+        if (isNativeEndpoint && firstNativeError === null) {
+          firstNativeError = errInfo
         }
         lastParsedError = errInfo
 
@@ -498,12 +564,14 @@ async function executeGenerateContentHttp(params: {
         }
 
         // 2. Nouvelle clé / Free Tier : retry automatique sur 429 ou indisponibilité transitoire 5xx
+        //    (sauf quota `limit: 0` : réessayer la même route ne sert à rien)
         if (
           (errInfo.status === 429 ||
             errInfo.status === 500 ||
             errInfo.status === 502 ||
             errInfo.status === 503 ||
             errInfo.status === 504) &&
+          !/limit:\s*0\b/i.test(errInfo.message) &&
           rateRetry < maxRateRetries
         ) {
           rateRetry += 1
@@ -556,12 +624,18 @@ async function executeGenerateContentHttp(params: {
     }
   }
 
-  const errorToReport = primaryParsedError ?? lastParsedError
+  // Priorité à l'erreur la plus pertinente : celle de la route principale, puis celle du
+  // fournisseur correspondant au type de clé. Une erreur d'un endpoint "étranger" (ex : 401
+  // Vertex pour une clé AI Studio) ne doit pas masquer un simple problème réseau.
+  const errorToReport =
+    primaryParsedError ?? firstNativeError ?? (sawNetworkError ? null : lastParsedError)
   if (errorToReport) {
     throw new Error(formatFriendlyApiError(errorToReport))
   }
   if (sawNetworkError) {
-    throw new Error('Réseau indisponible ou délai dépassé.')
+    throw new Error(
+      'Impossible de joindre Google (réseau indisponible, bloqueur de pub/extension ou pare-feu).',
+    )
   }
   throw new Error('Impossible de joindre Gemini.')
 }
@@ -577,7 +651,7 @@ async function postGenerateContent(params: {
     apiKey,
     prompt,
     responseSchema,
-    timeoutMs = 90_000,
+    timeoutMs = GENERATION_TIMEOUT_MS,
     priority = 'normal',
   } = params
   const cleanKey = sanitizeApiKey(apiKey)
@@ -610,8 +684,7 @@ export async function testGeminiConnection(
         required: ['status'],
       },
       // Le tier gratuit de gemini-3.8-flash (thinking HIGH) peut mettre 30-50 s à répondre :
-      // on laisse plus de marge qu'un simple ping, et un timeout bascule désormais sur
-      // les routes candidates au lieu d'échouer immédiatement.
+      // on laisse plus de marge qu'un simple ping.
       timeoutMs: 60_000,
       priority: 'high',
     })
@@ -1033,7 +1106,7 @@ ${rawText}
     apiKey,
     prompt,
     responseSchema: EXTRACT_WORKOUT_SCHEMA,
-    timeoutMs: 90_000,
+    timeoutMs: GENERATION_TIMEOUT_MS,
     priority: 'high',
   })
 
@@ -1224,7 +1297,7 @@ ${JSON.stringify(payload)}`
     apiKey,
     prompt,
     responseSchema: STATS_ANALYSIS_SCHEMA,
-    timeoutMs: 90_000,
+    timeoutMs: GENERATION_TIMEOUT_MS,
     priority: 'normal',
   })
 
