@@ -34,18 +34,35 @@ function getWorkingPool(sets: readonly WorkoutSet[], unit: Exercise['unit']): Wo
 }
 
 function detectExplicitVariant(exercise: Exercise, note: string): string | null {
-  const n = note.toLowerCase()
+  // Ignore les apartés rétrospectifs ou hypothétiques (« avant je faisais Calf… », « jusqu'au 2 novembre… »)
+  const n = note
+    .toLowerCase()
+    .replace(
+      /\b(?:avant\s+je\s+faisais|avant\s+j['’][eé]tais|je\s+pourrais\s+faire|jusqu['’]au)\b[^.|·)]*/g,
+      ' ',
+    )
+
   if (/poulie\s+haute/.test(n)) return 'Poulie haute'
   if (/poulie\s+basse|poulis\s+basse/.test(n)) return 'Poulie basse'
+  if (!/poulie/i.test(exercise.name) && /\bpoulies?\b|\bpoulis\b/.test(n)) return 'Poulie'
+  if (/poulie/i.test(exercise.name) && /\bhalt[eè]re/i.test(exercise.name) && /\bpoulies?\b|\bpoulis\b/.test(n)) {
+    return 'Poulie'
+  }
   if (/dans\s+le\s+dos/.test(n)) return 'Presse poids dos'
+  if (/hammer\s*streng/i.test(n) && /\bassis/i.test(exercise.name)) {
+    return 'Standard'
+  }
   // Mollets debout / jambes tendues (ex: « Calf » à la machine) : nouvelle variante,
   // les charges ne sont pas comparables avec la machine assise.
   if (/jambes?\s+tendues?|\btendues?\b/.test(n)) return 'Jambes tendues'
   if (/\bcalf\b|\bkhalf\b|debout/.test(n)) return 'Debout (Calf)'
+  if (/\bcurl\s+normal\b/.test(n)) return 'Curl normal'
   if (/machine\s*1\b/.test(n)) return 'Machine 1'
   if (/machine\s*2\b/.test(n)) return 'Machine 2'
   if (/par\s+c[oô]t[eé]/.test(n)) return 'Par côté'
-  if (/\bassise?\b/.test(n)) return 'Assis'
+  if (/\bassise?\b/.test(n)) {
+    return /\bassis/i.test(exercise.name) ? 'Standard' : 'Assis'
+  }
   if (/prone\s+leg\s+curl/.test(n)) return 'Prone leg curl'
   if (/wide\s+chest\s+press/.test(n)) return 'Wide chest press'
   if (!/halt[eè]re/i.test(exercise.name) && /\bhalt[eè]res?\b/.test(n)) {
@@ -105,6 +122,28 @@ export function buildEnrichedChronology(exercise: Exercise): EnrichedHistoryEntr
   const latestVariant =
     validChrono.length > 0 ? validChrono[validChrono.length - 1].variant : 'Standard'
 
+  // Si la toute dernière séance est un dépannage ponctuel (1 seule séance sur cette variante)
+  // alors qu'une variante habituelle compte au moins 2 séances, la courbe principale garde
+  // la variante habituelle afin de ne pas masquer tout l'historique ou mélanger les machines.
+  const countsByVariant = new Map<string, number>()
+  for (const item of validChrono) {
+    countsByVariant.set(item.variant, (countsByVariant.get(item.variant) ?? 0) + 1)
+  }
+  let primaryVariant = latestVariant
+  if ((countsByVariant.get(latestVariant) ?? 0) < 2) {
+    let dominantVariant = latestVariant
+    let dominantCount = countsByVariant.get(latestVariant) ?? 0
+    for (const [v, cnt] of countsByVariant.entries()) {
+      if (cnt > dominantCount) {
+        dominantVariant = v
+        dominantCount = cnt
+      }
+    }
+    if (dominantCount >= 2) {
+      primaryVariant = dominantVariant
+    }
+  }
+
   return validChrono.map(({ entry, variant }, idx) => {
     const chronoNumber = idx + 1
     const pool = getWorkingPool(entry.sets, exercise.unit)
@@ -133,9 +172,7 @@ export function buildEnrichedChronology(exercise: Exercise): EnrichedHistoryEntr
       shortLabel: entry.date ? formatIsoShort(entry.date) : `#${chronoNumber}`,
       setsDisplay: formatSetsForDisplay(entry.sets, exercise.unit),
       variant,
-      // "Standard" est l'équipement nominal ; si la toute dernière séance est sur une variante ponctuelle,
-      // on distingue toujours clairement chaque variante.
-      isPrimaryVariant: variant === latestVariant,
+      isPrimaryVariant: variant === primaryVariant,
       hasValidWeight,
       topWeight,
       topSetRepsAtPeak,
@@ -146,8 +183,10 @@ export function buildEnrichedChronology(exercise: Exercise): EnrichedHistoryEntr
 }
 
 export function getLatestBestSetSummary(exercise: Exercise): string {
-  const chrono = buildEnrichedChronology(exercise)
-  const latest = [...chrono].reverse().find((c) => c.hasValidWeight)
+  const allValid = buildEnrichedChronology(exercise).filter((c) => c.hasValidWeight)
+  const performed = allValid.filter((c) => !c.entry.wasObjective)
+  const source = performed.length > 0 ? performed : allValid
+  const latest = source[source.length - 1]
   if (!latest) return 'Aucune séance'
   if (exercise.unit === 'bodyweight' && latest.topWeight === 0) {
     return `PDC × ${formatNumberFr(latest.topSetRepsAtPeak)}`
@@ -205,7 +244,9 @@ export function getLatestRecordInfo(exercise: Exercise): LatestRecordInfo | null
  * ne produit jamais de faux "+4 kg" ni de "+295%" lors d'un changement de machine.
  */
 export function computeSmartExerciseInsight(exercise: Exercise): AiExerciseStatInsight {
-  const chrono = buildEnrichedChronology(exercise).filter((c) => c.hasValidWeight)
+  const allValid = buildEnrichedChronology(exercise).filter((c) => c.hasValidWeight)
+  const performed = allValid.filter((c) => !c.entry.wasObjective)
+  const chrono = performed.length > 0 ? performed : allValid
 
   if (chrono.length === 0) {
     return {
@@ -279,6 +320,15 @@ export function computeSmartExerciseInsight(exercise: Exercise): AiExerciseStatI
         badge: `+${formatNumberFr(repsDiffAtPeak)} ${repWord} à ${formatNumberFr(latest.topWeight)} kg`,
         status: 'progressing',
         summary: `Progression à ${formatNumberFr(latest.topWeight)} kg : ${formatNumberFr(immediatelyPrevious.topSetRepsAtPeak)} → ${formatNumberFr(latest.topSetRepsAtPeak)} reps (${latest.setsDisplay}).`,
+      }
+    }
+
+    if (repsDiffAtPeak < 0) {
+      return {
+        exerciseId: exercise.id,
+        badge: `${formatNumberFr(repsDiffAtPeak)} ${Math.abs(repsDiffAtPeak) === 1 ? 'rep' : 'reps'} · ${formatNumberFr(latest.topWeight)} kg`,
+        status: 'stable',
+        summary: `Léger recul sur la série 1 à ${formatNumberFr(latest.topWeight)} kg (${formatNumberFr(immediatelyPrevious.topSetRepsAtPeak)} → ${formatNumberFr(latest.topSetRepsAtPeak)} reps) : consolide la charge.`,
       }
     }
 

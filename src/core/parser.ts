@@ -56,6 +56,8 @@ export function inferExerciseMeta(name: string): {
   if (
     norm.includes('haltere') ||
     norm.includes('souleve de terre roumain') ||
+    norm.includes('curl') ||
+    norm.includes('elevation') ||
     norm.includes('oiseau') ||
     norm.includes('shrug')
   ) {
@@ -229,7 +231,7 @@ function matchExerciseHeader(line: string, preambleDone: boolean): HeaderMatch |
   return null
 }
 
-/** Extrait la durée de repos éventuelle et retourne le texte nettoyé. */
+/** Extrait la durée de repos éventuelle et retourne le texte nettoyé (avec marqueur de position). */
 function extractRestSeconds(input: string): { cleaned: string; restSeconds: number | null } {
   let restSeconds: number | null = null
   let cleaned = input
@@ -248,7 +250,7 @@ function extractRestSeconds(input: string): { cleaned: string; restSeconds: numb
       } else {
         restSeconds = Number(a) * 60 + (b ? Number(b) : 0)
       }
-      return ' '
+      return ' __META_TAG__ '
     })
   }
 
@@ -273,11 +275,11 @@ function extractDurationTag(
 
   cleaned = cleaned.replace(minSecRe, (_m, a: string, b?: string) => {
     seconds = Number(a) * 60 + (b ? Number(b) : 0)
-    return ' '
+    return ' __META_TAG__ '
   })
   cleaned = cleaned.replace(secOnlyRe, (_m, a: string) => {
     seconds = Number(a)
-    return ' '
+    return ' __META_TAG__ '
   })
 
   return { cleaned: cleaned.trim(), seconds }
@@ -285,15 +287,27 @@ function extractDurationTag(
 
 /**
  * Extrait les commentaires entre parenthèses (y compris imbriqués ou parenthèses
- * non fermées avant `, <reps>`) et conserve `__FAIL__` pour `(échec)`.
+ * non fermées avant `, <reps>`), conserve `__FAIL__` pour `(échec)` et `__WARMUP__`
+ * pour `(échauffement)`, et peut laisser des jetons `__NOTE_i__` à l'endroit exact
+ * où le commentaire a été écrit.
  */
-function extractInlineComments(input: string): { cleaned: string; notes: string[] } {
+function extractInlineComments(
+  input: string,
+  keepPlaceholders = false,
+): { cleaned: string; notes: string[] } {
   const notes: string[] = []
 
-  // Marqueurs spéciaux pour (échec) et (échauffement) afin de les associer à la série concernée
   const text = input
     .replace(/\(\s*[eé]chec\s*\)/gi, ' __FAIL__ ')
     .replace(/\(\s*[eé]chauffement\s*\)/gi, ' __WARMUP__ ')
+
+  const pushNote = (rawNote: string): string => {
+    const trimmed = rawNote.trim()
+    if (!trimmed) return ' '
+    const idx = notes.length
+    notes.push(trimmed)
+    return keepPlaceholders ? ` __NOTE_${idx}__ ` : ' '
+  }
 
   let out = ''
   let i = 0
@@ -304,7 +318,6 @@ function extractInlineComments(input: string): { cleaned: string; notes: string[
       continue
     }
 
-    // Recherche de la parenthèse fermante correspondante
     let depth = 1
     let j = i + 1
     let typoSplitAt = -1
@@ -321,17 +334,13 @@ function extractInlineComments(input: string): { cleaned: string; notes: string[
     }
 
     if (typoSplitAt !== -1) {
-      const rawNote = text.slice(i + 1, typoSplitAt).trim()
-      if (rawNote) notes.push(rawNote)
-      out += ' '
-      i = typoSplitAt + 1 // saute le `(` fautif et garde `, 8`
+      out += pushNote(text.slice(i + 1, typoSplitAt))
+      i = typoSplitAt + 1
       continue
     }
 
     if (depth === 0) {
-      const rawNote = text.slice(i + 1, j - 1).trim()
-      if (rawNote) notes.push(rawNote)
-      out += ' '
+      out += pushNote(text.slice(i + 1, j - 1))
       i = j
       continue
     }
@@ -343,12 +352,9 @@ function extractInlineComments(input: string): { cleaned: string; notes: string[
       unclosed,
     )
     if (trailingRepsMatch) {
-      const rawNote = trailingRepsMatch[1].trim()
-      if (rawNote) notes.push(rawNote)
-      out += ` ${trailingRepsMatch[2]}`
+      out += `${pushNote(trailingRepsMatch[1])} ${trailingRepsMatch[2]}`
     } else {
-      const rawNote = unclosed.trim()
-      if (rawNote) notes.push(rawNote)
+      out += pushNote(unclosed)
     }
     break
   }
@@ -356,14 +362,55 @@ function extractInlineComments(input: string): { cleaned: string; notes: string[
   return { cleaned: out.replace(/\s+/g, ' ').trim(), notes }
 }
 
-function parseRepsTokens(rawReps: string): {
-  repsList: { reps: number; failure?: boolean }[]
-  trailingNote: string
-} {
-  const repsList: { reps: number; failure?: boolean }[] = []
-  const extraNotes: string[] = []
+function expandNoteTokens(
+  text: string,
+  noteTable: readonly string[],
+): { expanded: string; plainOnly: string } {
+  const plainOnly = text
+    .replace(/__NOTE_\d+__/g, ' ')
+    .replace(/__(?:FAIL|WARMUP|META_TAG)__/g, ' ')
+    .replace(/^[:",\s]+|[:",\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 
-  // Normalise "11,5" collé sans espace (demi-rep), "8ou9" -> "8.5", "12-13" -> 12
+  const pieces: string[] = []
+  const tokenRe = /__NOTE_(\d+)__/g
+  let last = 0
+  let m: RegExpExecArray | null
+  while ((m = tokenRe.exec(text)) !== null) {
+    const before = text
+      .slice(last, m.index)
+      .replace(/__(?:FAIL|WARMUP|META_TAG)__/g, ' ')
+      .replace(/^[:",\s]+|[:",\s]+$/g, '')
+      .trim()
+    if (before) pieces.push(before)
+    const note = noteTable[Number(m[1])]
+    if (note) pieces.push(note)
+    last = tokenRe.lastIndex
+  }
+  const after = text
+    .slice(last)
+    .replace(/__(?:FAIL|WARMUP|META_TAG)__/g, ' ')
+    .replace(/^[:",\s]+|[:",\s]+$/g, '')
+    .trim()
+  if (after) pieces.push(after)
+
+  return { expanded: pieces.join(' · '), plainOnly }
+}
+
+function parseRepsTokens(
+  rawReps: string,
+  noteTable: readonly string[] = [],
+): {
+  repsList: { reps: number; failure?: boolean; note?: string }[]
+  orphanNotes: string[]
+  plainExtraNotes: string[]
+} {
+  const repsList: { reps: number; failure?: boolean; note?: string }[] = []
+  const orphanNotes: string[] = []
+  const plainExtraNotes: string[] = []
+
+  // Normalise "11,5" collé sans espace (demi-rep), "8ou9" -> "8.5", "12-13" ou "12/13" -> 12
   const normalized = rawReps
     .replace(/(\d+),5\b/g, '$1.5')
     .replace(/(\d+)\s*ou\s*(\d+)/gi, (_m, a: string, b: string) =>
@@ -372,56 +419,87 @@ function parseRepsTokens(rawReps: string): {
     .replace(/(\d+)\s*-\s*(\d+)/g, (_m, a: string, b: string) =>
       String(Math.floor((Number(a) + Number(b)) / 2)),
     )
+    .replace(/(^|,\s*)(\d+)\s*\/\s*(\d+)(?=$|[\s,])/g, (_m, lead: string, a: string, b: string) =>
+      `${lead}${Math.floor((Number(a) + Number(b)) / 2)}`,
+    )
+
+  const appendSetNote = (targetIdx: number, noteText: string) => {
+    const clean = noteText.trim()
+    if (!clean) return
+    if (targetIdx >= 0 && targetIdx < repsList.length) {
+      const prev = repsList[targetIdx].note
+      repsList[targetIdx].note = prev ? `${prev} · ${clean}` : clean
+    } else {
+      orphanNotes.push(clean)
+    }
+  }
 
   const commaParts = normalized.split(',')
   for (const part of commaParts) {
     const trimmed = part.trim()
     if (!trimmed) continue
 
-    // Cherche les nombres dans ce segment (supporte `15 13` ou `8 __FAIL__`)
-    const tokenRegex = /(\d+(?:[.,]\d+)?)(\s*__FAIL__)?/g
+    // Jeton : soit un nombre de reps (avec éventuel __FAIL__), soit un commentaire __NOTE_k__
+    const itemRegex = /__NOTE_(\d+)__|(\d+(?:[.,]\d+)?)(\s*__FAIL__)?/g
     let match: RegExpExecArray | null
     let lastEnd = 0
-    let foundAny = false
+    let foundRepInSegment = false
 
-    while ((match = tokenRegex.exec(trimmed)) !== null) {
-      const before = trimmed.slice(lastEnd, match.index).trim()
-      // Si du texte s'intercale avant un nombre (ex: "réglage à 2/3"), on s'arrête
-      if (before && /[a-zA-ZÀ-ÿ]/.test(before) && foundAny) {
-        extraNotes.push(trimmed.slice(match.index - before.length).trim())
+    while ((match = itemRegex.exec(trimmed)) !== null) {
+      const before = trimmed
+        .slice(lastEnd, match.index)
+        .replace(/__(?:FAIL|WARMUP|META_TAG)__/g, ' ')
+        .trim()
+
+      // Si du texte libre s'intercale avant un nombre (ex: "c'est beaucoup plus simple avec ce réglage"), on s'arrête
+      if (before && /[a-zA-ZÀ-ÿ]/.test(before)) {
+        const restRaw = trimmed.slice(lastEnd)
+        const { expanded, plainOnly } = expandNoteTokens(restRaw, noteTable)
+        if (plainOnly && plainOnly !== '.' && !/^reps?$/i.test(plainOnly)) {
+          plainExtraNotes.push(plainOnly)
+        }
+        appendSetNote(repsList.length - 1, expanded)
         lastEnd = trimmed.length
         break
       }
-      if (before && /[a-zA-ZÀ-ÿ]/.test(before) && !foundAny) {
-        extraNotes.push(trimmed)
-        lastEnd = trimmed.length
-        break
-      }
 
-      const val = Number(match[1].replace(',', '.'))
-      if (Number.isFinite(val) && val > 0 && val <= 200) {
-        repsList.push({
-          reps: val,
-          ...(match[2] ? { failure: true } : {}),
-        })
-        foundAny = true
+      if (match[1] !== undefined) {
+        const noteContent = noteTable[Number(match[1])] ?? ''
+        appendSetNote(repsList.length - 1, noteContent)
+      } else if (match[2] !== undefined) {
+        const val = Number(match[2].replace(',', '.'))
+        if (Number.isFinite(val) && val > 0 && val <= 200) {
+          repsList.push({
+            reps: val,
+            ...(match[3] ? { failure: true } : {}),
+          })
+          foundRepInSegment = true
+        }
       }
-      lastEnd = tokenRegex.lastIndex
+      lastEnd = itemRegex.lastIndex
     }
 
     const tail = trimmed
       .slice(lastEnd)
-      .replace(/__FAIL__/g, '')
-      .replace(/__WARMUP__/g, '')
+      .replace(/__(?:FAIL|WARMUP|META_TAG)__/g, '')
       .trim()
     if (tail && tail !== '.' && !/^reps?$/i.test(tail)) {
-      extraNotes.push(tail)
+      const { expanded, plainOnly } = expandNoteTokens(tail, noteTable)
+      if (plainOnly && plainOnly !== '.' && !/^reps?$/i.test(plainOnly)) {
+        plainExtraNotes.push(plainOnly)
+      }
+      if (foundRepInSegment) {
+        appendSetNote(repsList.length - 1, expanded)
+      } else {
+        orphanNotes.push(expanded)
+      }
     }
   }
 
   return {
     repsList,
-    trailingNote: extraNotes.join(' · '),
+    orphanNotes,
+    plainExtraNotes,
   }
 }
 
@@ -454,11 +532,25 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
     .replace(/^[•\-*]\s*/, '')
     .replace(/^\[[ xX]?\]\s*/, '')
     .trim()
-  const collectedNotes: string[] = []
+  const entryLevelNotes: string[] = []
+  const allNotesForEntry: string[] = []
   let wasObjective = false
   let date: string | null = null
 
-  // 1. Extraction des durées (repos, exo, séance)
+  const pushEntryNote = (n: string) => {
+    const clean = n.replace(/^[:",\s]+|[:",\s]+$/g, '').trim()
+    if (!clean || /^[():,;-]+$/.test(clean)) return
+    entryLevelNotes.push(clean)
+    allNotesForEntry.push(clean)
+  }
+
+  const pushAllOnlyNote = (n: string) => {
+    const clean = n.replace(/^[:",\s]+|[:",\s]+$/g, '').trim()
+    if (!clean || /^[():,;-]+$/.test(clean)) return
+    allNotesForEntry.push(clean)
+  }
+
+  // 1. Extraction des durées (repos, exo, séance) avec marqueur de position __META_TAG__
   const restResult = extractRestSeconds(working)
   working = restResult.cleaned
   const restSeconds = restResult.restSeconds
@@ -491,14 +583,17 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
         }
       }
       if (colonPos >= 0) {
-        let metaBetween = afterDate.slice(0, colonPos).trim()
+        let metaBetween = afterDate
+          .slice(0, colonPos)
+          .replace(/__META_TAG__/g, ' ')
+          .trim()
         if (/\(\s*objectif\s*\)/i.test(metaBetween)) {
           wasObjective = true
           metaBetween = metaBetween.replace(/\(\s*objectif\s*\)/gi, '').trim()
         }
-        const metaComments = extractInlineComments(metaBetween)
-        collectedNotes.push(...metaComments.notes)
-        if (metaComments.cleaned) collectedNotes.push(metaComments.cleaned)
+        const metaComments = extractInlineComments(metaBetween, false)
+        for (const n of metaComments.notes) pushEntryNote(n)
+        if (metaComments.cleaned) pushEntryNote(metaComments.cleaned)
         working = afterDate.slice(colonPos + 1).trim()
       } else {
         working = afterDate
@@ -506,29 +601,61 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
     }
   }
 
-  // 3. Extraction des commentaires entre parenthèses dans la partie séries
-  const { cleaned: withoutParens, notes: inlineNotes } = extractInlineComments(working)
-  collectedNotes.push(...inlineNotes)
+  // 3. Sépare les éventuels commentaires de fin de ligne écrits APRÈS `(repos : ...)`
+  let setsZone = working
+  const metaPos = working.indexOf('__META_TAG__')
+  if (metaPos >= 0) {
+    const beforeMeta = working.slice(0, metaPos).trim()
+    const afterMeta = working
+      .slice(metaPos)
+      .replace(/__META_TAG__/g, ' ')
+      .trim()
+    if (
+      beforeMeta &&
+      /\d/.test(beforeMeta) &&
+      afterMeta &&
+      !/\d+(?:[.,]\d+)?\s*(?:kg)?\s*[xX×*]/i.test(afterMeta)
+    ) {
+      const trailing = extractInlineComments(afterMeta, false)
+      for (const n of trailing.notes) pushEntryNote(n)
+      if (trailing.cleaned) pushEntryNote(trailing.cleaned)
+      setsZone = beforeMeta
+    }
+  }
+  setsZone = setsZone.replace(/__META_TAG__/g, ' ').trim()
 
-  // 4. Découpage par blocs `|`
-  const blocks = withoutParens.split('|')
+  // 4. Tokenisation positionnelle des commentaires entre parenthèses dans la zone séries
+  const { cleaned: tokenizedSets, notes: inlineNotes } = extractInlineComments(setsZone, true)
+  for (const n of inlineNotes) pushAllOnlyNote(n)
+
+  // 5. Découpage par blocs `|`
+  const blocks = tokenizedSets.split('|')
   const sets: WorkoutSet[] = []
 
-  /** Un bloc = un groupe de séries de même charge : son commentaire décrit ce groupe. */
   const pushSetGroup = (
     weight: number,
-    repsList: { reps: number; failure?: boolean }[],
-    note: string,
+    repsList: { reps: number; failure?: boolean; note?: string }[],
+    prefixNote: string,
+    orphanNotes: string[],
     warmup: boolean,
   ) => {
-    const clean = note.replace(/\s*·\s*$/, '').trim()
+    const cleanPrefix = prefixNote.replace(/\s*·\s*$/, '').trim()
+    const cleanOrphans = orphanNotes.map((n) => n.trim()).filter(Boolean)
+
     repsList.forEach((r, idx) => {
+      const parts: string[] = []
+      if (idx === 0 && cleanPrefix) parts.push(cleanPrefix)
+      if (r.note) parts.push(r.note)
+      if (idx === repsList.length - 1 && cleanOrphans.length > 0) {
+        parts.push(...cleanOrphans)
+      }
+      const note = parts.join(' · ').trim()
       sets.push({
         weight,
         reps: r.reps,
         ...(warmup ? { isWarmup: true } : {}),
         ...(r.failure ? { failure: true } : {}),
-        ...(idx === 0 && clean ? { note: clean } : {}),
+        ...(note ? { note } : {}),
       })
     })
   }
@@ -546,61 +673,92 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
         .trim()
     }
 
+    // Déplace un commentaire intercalé entre `<poids>kg` et `x <reps>` (ex: `14kg (pas trouvé 10) x 12`)
+    block = block.replace(
+      /(\b\d+(?:[.,]\d+)?\s*(?:kg)?)\s+((?:__NOTE_\d+__\s*)+)(?=[xX×*\d])/gi,
+      '$2 $1 ',
+    )
+
     // Cas poids de corps : "Poids de corps × 6" ou "PDC x 8"
-    const pdcMatch = /^(?:poids\s+de\s+corps|poids\s+du\s+corps|pdc|bw)\s*[xX×*]\s*(.+)$/i.exec(
+    const pdcMatch = /^(.*?)(?:poids\s+de\s+corps|poids\s+du\s+corps|pdc|bw)\s*[xX×*]\s*(.+)$/i.exec(
       block,
     )
     if (pdcMatch) {
-      const { repsList, trailingNote } = parseRepsTokens(pdcMatch[1])
-      pushSetGroup(0, repsList, trailingNote, explicitWarmup)
+      const { expanded: prefixExpanded, plainOnly } = expandNoteTokens(pdcMatch[1], inlineNotes)
+      if (plainOnly) pushAllOnlyNote(plainOnly)
+      const { repsList, orphanNotes, plainExtraNotes } = parseRepsTokens(pdcMatch[2], inlineNotes)
+      for (const n of plainExtraNotes) pushAllOnlyNote(n)
+      pushSetGroup(0, repsList, prefixExpanded, orphanNotes, explicitWarmup)
       continue
     }
 
     // Cas "1 rep" (ex: Traction : 1 rep)
-    const singleRepMatch = /^(\d+)\s*reps?$/i.exec(block)
+    const singleRepMatch = /^(\d+)\s*reps?((?:\s*__NOTE_\d+__)*)$/i.exec(block)
     if (singleRepMatch) {
-      sets.push({ weight: 0, reps: Number(singleRepMatch[1]) })
+      const { expanded } = expandNoteTokens(singleRepMatch[2] ?? '', inlineNotes)
+      sets.push({
+        weight: 0,
+        reps: Number(singleRepMatch[1]),
+        ...(expanded ? { note: expanded } : {}),
+      })
       continue
     }
 
     // Cas standard : `[préfixe éventuel] <poids>[kg] x <reps>`
     const stdMatch = /^(.*?)\b(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*[xX×*]\s*(.+)$/.exec(block)
     if (stdMatch) {
-      const prefix = stdMatch[1].replace(/^[:",\s]+|[:",\s]+$/g, '').trim()
+      const { expanded: prefixExpanded, plainOnly } = expandNoteTokens(stdMatch[1], inlineNotes)
+      if (plainOnly) pushAllOnlyNote(plainOnly)
       const weight = Number(stdMatch[2].replace(',', '.'))
-      const { repsList, trailingNote } = parseRepsTokens(stdMatch[3])
-      pushSetGroup(weight, repsList, [prefix, trailingNote].filter(Boolean).join(' · '), explicitWarmup)
+      const { repsList, orphanNotes, plainExtraNotes } = parseRepsTokens(stdMatch[3], inlineNotes)
+      for (const n of plainExtraNotes) pushAllOnlyNote(n)
+      pushSetGroup(weight, repsList, prefixExpanded, orphanNotes, explicitWarmup)
       continue
     }
 
     // Cas `x` omis après `kg` : `10kg 13` ou `20kg 15, 12`
     const noXMatch = /^(.*?)\b(\d+(?:[.,]\d+)?)\s*kg\s+(\d.*)$/i.exec(block)
     if (noXMatch) {
-      const prefix = noXMatch[1].replace(/^[:",\s]+|[:",\s]+$/g, '').trim()
+      const { expanded: prefixExpanded, plainOnly } = expandNoteTokens(noXMatch[1], inlineNotes)
+      if (plainOnly) pushAllOnlyNote(plainOnly)
       const weight = Number(noXMatch[2].replace(',', '.'))
-      const { repsList, trailingNote } = parseRepsTokens(noXMatch[3])
-      pushSetGroup(weight, repsList, [prefix, trailingNote].filter(Boolean).join(' · '), explicitWarmup)
+      const { repsList, orphanNotes, plainExtraNotes } = parseRepsTokens(noXMatch[3], inlineNotes)
+      for (const n of plainExtraNotes) pushAllOnlyNote(n)
+      pushSetGroup(weight, repsList, prefixExpanded, orphanNotes, explicitWarmup)
       continue
     }
 
-    // Aucun motif de série reconnu dans ce bloc -> note
-    const leftover = block.replace(/__FAIL__/g, 'échec').trim()
-    if (leftover) collectedNotes.push(leftover)
+    // Aucun motif de série reconnu dans ce bloc -> note d'entrée
+    const leftoverRaw = block.replace(/__FAIL__/g, 'échec')
+    const { expanded, plainOnly } = expandNoteTokens(leftoverRaw, inlineNotes)
+    if (plainOnly) pushAllOnlyNote(plainOnly)
+    if (expanded) entryLevelNotes.push(expanded)
   }
 
-  const finalSets = markWarmupSets(sets)
-  const cleanNote = collectedNotes
-    .map((n) => n.replace(/^[:",\s]+|[:",\s]+$/g, '').trim())
-    .filter(Boolean)
-    .join(' · ')
+  const markedSets = markWarmupSets(sets)
+  const finalSets = attributeEntryNotesToSets(markedSets, entryLevelNotes)
+
+  const seenNotes = new Set<string>()
+  const dedupedNotes: string[] = []
+  for (const n of allNotesForEntry) {
+    const clean = n.replace(/^[:",\s]+|[:",\s]+$/g, '').trim()
+    if (!clean || /^[():,;-]+$/.test(clean)) continue
+    if (!seenNotes.has(clean)) {
+      seenNotes.add(clean)
+      dedupedNotes.push(clean)
+    }
+  }
+  const cleanNote = dedupedNotes.join(' · ')
 
   if (finalSets.length === 0) {
+    const fallbackRaw = rawLine.replace(/^[•\-*]\s*/, '').trim()
+    const hasStructuredHeader = date !== null || restSeconds !== null || workSeconds !== null
     return {
       id: createId('entry'),
       date,
       sets: [],
       restSeconds,
-      note: cleanNote || rawLine.replace(/^[•\-*]\s*/, '').trim(),
+      note: cleanNote || (hasStructuredHeader ? '' : fallbackRaw),
       skipOnly: true,
     }
   }
@@ -629,46 +787,44 @@ export interface ParseNotepadOptions {
 }
 
 /**
- * Une série n'a pas de note à elle : la note d'une entrée est donc rattachée à la série
- * de travail qu'elle commente. Une note collée juste après une série (même à la suite de la
- * précédente) concerne celle-là ; une note en fin de ligne, après un `(repos : …)`, parle de
- * toute la séquence et revient à la première série de travail. Seules les annotations de
- * contexte (durée de repos, séance, échauffement, Objectif, variante de machine) restent au niveau
- * de l'entrée : c'est ce qui permet au coach de lire « 2min30 » sur la série concernée.
+ * Rattache uniquement les notes globales d'entrée (en-tête avant `:`, bloc libre ou commentaire
+ * écrit en fin de ligne après `(repos : …)`) aux séries de travail encore muettes.
+ * Les commentaires écrits directement à côté d'une série (y compris d'échauffement) y sont déjà posés.
  */
 const CONTEXT_ONLY_NOTE =
   /^(?:repos\b|r[eé]cup|s[eé]ance\b|exo\b|exercice\b|[eé]chauffements?\b|objectif\b|aujourd|duree|dur[ée]e\b)/i
 
-function attributeNotesToSets(entry: ExerciseEntry): ExerciseEntry {
-  const note = entry.note.replace(/\s*·\s*/g, ' | ').trim()
-  if (!note || entry.sets.length === 0) return entry
-  const fragments = note
-    .split(/\s*[|·]\s*/)
+function attributeEntryNotesToSets(
+  sets: WorkoutSet[],
+  entryLevelNotes: readonly string[],
+): WorkoutSet[] {
+  if (entryLevelNotes.length === 0 || sets.length === 0) return sets
+  const comments = entryLevelNotes
+    .flatMap((part) => part.split(/\s*[|·]\s*/))
     .map((part) => part.trim())
-    .filter(Boolean)
-  const comments = fragments.filter((part) => !CONTEXT_ONLY_NOTE.test(part))
-  if (comments.length === 0) return entry
+    .filter((part) => Boolean(part) && !CONTEXT_ONLY_NOTE.test(part))
+  if (comments.length === 0) return sets
 
-  const workIdx = entry.sets
+  const workIdx = sets
     .map((set, idx) => (set.isWarmup ? -1 : idx))
     .filter((idx) => idx >= 0)
-  if (workIdx.length === 0) return entry
+  if (workIdx.length === 0) return sets
 
-  const cleaned = [...entry.sets]
-  // Les notes déjà posées sur une série (commentaire écrit à côté d'elle) restent à leur place :
-  // seules les séries encore muettes reçoivent les commentaires restants, dans l'ordre.
+  const cleaned = [...sets]
   const silent = workIdx.filter((idx) => !(cleaned[idx].note ?? '').trim())
   comments.forEach((comment, i) => {
     const target =
       silent[i] ??
-      // Plus de commentaires que de séries : les suivants précisent la dernière série.
       (silent[silent.length - 1] ?? workIdx[workIdx.length - 1])
     const set = cleaned[target]
     const previous = (set.note ?? '').trim()
     cleaned[target] = { ...set, note: previous ? `${previous} · ${comment}` : comment }
   })
-  return { ...entry, sets: cleaned }
+  return cleaned
 }
+
+const PASTED_PREAMBLE_PROSE_RE =
+  /^(?:aujourd['’]hui,\s*c['’]est\s+soit|r[eè]gle\s+(?:de\s+s[eé]lection|d['’]or)|format\s+d['’]ex[eé]cution|je\s+mesure\s+\d\s*m\s*\d{2}|pour\s+chaque\s+exercice|enl[eè]ve\s+les\s*\(\s*objectif\s*\)|\d+\.\s+(?:exercices\s+actifs|r[eé]dige\s+la\s+s[eé]ance|g[eé]n[eè]re\s+la\s+s[eé]ance|dans\s+ce\s+bloc))/i
 
 export function parseNotepad(
   rawText: string,
@@ -676,7 +832,7 @@ export function parseNotepad(
 ): ParsedNotepad {
   const rawLines = rawText.split(/\r?\n/)
   const preambleLines: string[] = []
-  const exercises: Exercise[] = []
+  let exercises: Exercise[] = []
 
   let preambleDone = false
   let currentSection: SectionId = 'up'
@@ -695,6 +851,11 @@ export function parseNotepad(
 
   for (const rawLine of rawLines) {
     const trimmed = rawLine.trim()
+
+    // Ignore les balises de code Markdown ``` éventuelles autour d'un carnet collé
+    if (/^```[a-zA-Z0-9_-]*\s*$/.test(trimmed)) {
+      continue
+    }
 
     if (!trimmed) {
       if (!preambleDone) preambleLines.push('')
@@ -748,6 +909,14 @@ export function parseNotepad(
       continue
     }
 
+    // Si l'utilisateur colle son carnet complet en dessous d'un modèle déjà présent,
+    // récupère les règles du préambule collé au lieu d'en faire des entrées d'exercice.
+    if (PASTED_PREAMBLE_PROSE_RE.test(trimmed)) {
+      preambleLines.push(rawLine)
+      currentExercise = null
+      continue
+    }
+
     if (currentExercise) {
       let lineContent = trimmed
       if (inArchivedBlock && lineContent.endsWith(')')) {
@@ -776,6 +945,35 @@ export function parseNotepad(
 
   flushBullets()
 
+  // Si l'utilisateur a collé son vrai carnet à la suite d'un squelette vierge (ex: DEFAULT_NOTEPAD_TEXT),
+  // retire le bloc vierge initial dès lors qu'au moins un exercice est dupliqué plus bas avec de vraies séries.
+  const firstPopulatedIdx = exercises.findIndex((ex) =>
+    ex.entries.some((e) => !e.skipOnly && e.sets.length > 0),
+  )
+  if (firstPopulatedIdx > 0) {
+    const populatedNames = new Set(
+      exercises
+        .slice(firstPopulatedIdx)
+        .filter((ex) => ex.entries.some((e) => !e.skipOnly && e.sets.length > 0))
+        .map((ex) => ex.normalizedName),
+    )
+    const leadingEmpty = exercises.slice(0, firstPopulatedIdx)
+    const hasDuplicateWithData = leadingEmpty.some((ex) => populatedNames.has(ex.normalizedName))
+    if (hasDuplicateWithData) {
+      exercises = exercises.slice(firstPopulatedIdx)
+    }
+  }
+
+  // Déduplique aussi les identifiants si deux exercices portent le même nom normalisé
+  const usedIds = new Map<string, number>()
+  for (const ex of exercises) {
+    const count = usedIds.get(ex.id) ?? 0
+    if (count > 0) {
+      ex.id = `${ex.id}-${count + 1}`
+    }
+    usedIds.set(ex.id.replace(/-\d+$/, ''), count + 1)
+  }
+
   // Post-traitement :
   // 1. Met à jour `defaultRestSeconds` depuis l'entrée la plus récente qui a un repos explicite
   // 2. Active uniquement les exercices ayant des dates récentes dans une section si cette section
@@ -787,9 +985,40 @@ export function parseNotepad(
     )
 
     for (const ex of sectionExercises) {
-      const recentWithRest = ex.entries.find((e) => e.restSeconds !== null && e.restSeconds > 0)
+      const recentWithRest =
+        ex.entries.find((e) => !e.skipOnly && e.restSeconds !== null && e.restSeconds > 0) ??
+        ex.entries.find((e) => e.restSeconds !== null && e.restSeconds > 0)
       if (recentWithRest?.restSeconds) {
         ex.defaultRestSeconds = recentWithRest.restSeconds
+      }
+
+      if (ex.unit === 'kg') {
+        const recentEntries = ex.entries.filter((e) => !e.skipOnly && e.sets.length > 0).slice(0, 2)
+        if (recentEntries.length > 0) {
+          const latestWorkWeights = Array.from(
+            new Set(
+              recentEntries[0].sets
+                .filter((s) => !s.isWarmup && s.weight > 0)
+                .map((s) => s.weight),
+            ),
+          )
+          if (latestWorkWeights.length >= 2) {
+            const gap = Math.round(Math.abs(latestWorkWeights[0] - latestWorkWeights[1]) * 100) / 100
+            if (gap === 0.5 || gap === 1 || gap === 1.25 || gap === 2 || gap === 2.5) {
+              ex.weightStep = gap
+            } else if (gap === 5 && ex.weightStep === 2.5 && recentEntries.length >= 2) {
+              const allRecentWork = recentEntries.flatMap((e) =>
+                e.sets.filter((s) => !s.isWarmup && s.weight > 0).map((s) => s.weight),
+              )
+              const hasFractional = allRecentWork.some((w) => w % 1 !== 0)
+              if (!hasFractional && allRecentWork.every((w) => w % 5 === 0)) {
+                ex.weightStep = 5
+              }
+            }
+          } else if (ex.weightStep === 2 && latestWorkWeights.some((w) => w % 2 === 1 && w <= 15)) {
+            ex.weightStep = 1
+          }
+        }
       }
 
       if (ex.archived) {
@@ -802,9 +1031,7 @@ export function parseNotepad(
     }
   }
 
-  const withNotes = exercises.map((ex) => ({ ...ex, entries: ex.entries.map(attributeNotesToSets) }))
-
-  const settled = options.todayIso ? settleObjectives(withNotes, options.todayIso) : withNotes
+  const settled = options.todayIso ? settleObjectives(exercises, options.todayIso) : exercises
 
   const rawPreamble = preambleLines.join('\n').trim()
   const preamble = options.preserveCustomPreamble
@@ -985,9 +1212,9 @@ export function formatEntryForNotepad(entry: ExerciseEntry, unit: Unit): string 
     return `• ${entry.raw.replace(/^[•\-*]\s*/, '').trim()}`
   }
   if (entry.skipOnly) {
-    return `• ${entry.note}`
+    return entry.note ? `• ${entry.note}` : '•'
   }
-  const datePart = entry.date ? `${formatIsoToFr(entry.date)} : ` : ''
+  const datePart = entry.date ? `${formatIsoToFr(entry.date)}${entry.wasObjective ? ' (Objectif)' : ''} : ` : ''
   const setsPart = formatSetsForNotepad(entry.sets, unit)
   const notePart = entry.note ? ` (${entry.note})` : ''
   const restPart = entry.restSeconds ? ` (repos : ${formatRestDuration(entry.restSeconds)})` : ''
@@ -995,7 +1222,7 @@ export function formatEntryForNotepad(entry: ExerciseEntry, unit: Unit): string 
   const sessionPart = entry.sessionDurationSeconds
     ? ` (séance : ${formatRestDuration(entry.sessionDurationSeconds)})`
     : ''
-  return `• ${datePart}${setsPart}${notePart}${restPart}${workPart}${sessionPart}`
+  return `• ${datePart}${setsPart}${restPart}${workPart}${sessionPart}${notePart}`
 }
 
 export function formatPlanLineForNotepad(params: {
@@ -1061,8 +1288,13 @@ export function exportNotepad(params: {
       lines.push(`${prefix}${ex.name} :`)
     }
 
+    const alreadyHasSameObjective = Boolean(
+      planDateIso && ex.entries.some((e) => e.wasObjective && e.date === planDateIso),
+    )
+
     if (
       includeObjectives &&
+      !alreadyHasSameObjective &&
       plan &&
       planDateIso &&
       plan.section === ex.section &&

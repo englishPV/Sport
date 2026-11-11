@@ -1,7 +1,9 @@
+import { buildEnrichedChronology } from './statsEngine'
 import {
   formatIsoToFr,
   formatNumberFr,
   SECTION_LABELS,
+  todayISODate,
   type CoachSessionPlan,
   type Exercise,
   type ExerciseEntry,
@@ -14,19 +16,92 @@ function roundWeight(value: number): number {
   return Math.max(0, Math.round(value * 100) / 100)
 }
 
-export function getLatestEntry(exercise: Exercise): ExerciseEntry | null {
-  return exercise.entries.find((e) => !e.skipOnly && e.sets.length > 0) ?? null
+/** Un objectif daté d'aujourd'hui ou du futur n'est pas encore une séance réalisée. */
+export function isPendingObjective(entry: ExerciseEntry, todayIso = todayISODate()): boolean {
+  return Boolean(entry.wasObjective && entry.date && entry.date >= todayIso)
+}
+
+function resolveIntendedWarmupWeight(
+  warmupWeight: number,
+  note: string | undefined,
+  firstWorkWeight: number,
+): number {
+  if (!note) return warmupWeight
+  const m = /pas\s+trouv[eé]\s+(\d+(?:[.,]\d+)?)/i.exec(note)
+  if (!m) return warmupWeight
+  const intended = Number(m[1].replace(',', '.'))
+  if (Number.isFinite(intended) && intended > 0 && (firstWorkWeight <= 0 || intended < firstWorkWeight)) {
+    return intended
+  }
+  return warmupWeight
+}
+
+export function getExerciseVariants(exercise: Exercise, todayIso = todayISODate()): string[] {
+  const realized = exercise.entries.filter(
+    (e) => !e.skipOnly && e.sets.length > 0 && !isPendingObjective(e, todayIso),
+  )
+  if (realized.length === 0) return []
+  const chrono = buildEnrichedChronology({ ...exercise, entries: realized })
+  const seen = new Set<string>()
+  // Du plus récent au plus ancien pour mettre les variantes récentes en premier
+  for (let i = chrono.length - 1; i >= 0; i -= 1) {
+    seen.add(chrono[i].variant)
+  }
+  const list = Array.from(seen)
+  if (list.includes('Standard')) {
+    return ['Standard', ...list.filter((v) => v !== 'Standard')]
+  }
+  return list
+}
+
+export function getLatestEntry(
+  exercise: Exercise,
+  todayIso = todayISODate(),
+  variant?: string,
+): ExerciseEntry | null {
+  const realized = exercise.entries.filter(
+    (e) => !e.skipOnly && e.sets.length > 0 && !isPendingObjective(e, todayIso),
+  )
+  if (realized.length === 0) return null
+
+  const chrono = buildEnrichedChronology({ ...exercise, entries: realized })
+  if (chrono.length === 0) return realized[0] ?? null
+
+  if (variant) {
+    for (let i = chrono.length - 1; i >= 0; i -= 1) {
+      if (chrono[i].variant === variant) return chrono[i].entry
+    }
+    return realized[0] ?? null
+  }
+
+  // Si la toute dernière séance est un dépannage isolé d'une seule séance sur une autre
+  // variante alors que les 2+ séances précédentes étaient sur la variante principale Standard
+  // (ex: 03/11 Calf debout après 26/10 et 20/10 sur Machine assis), reprend la dernière séance Standard.
+  const latestChrono = chrono[chrono.length - 1]
+  if (
+    latestChrono &&
+    latestChrono.variant !== 'Standard' &&
+    !latestChrono.isPrimaryVariant &&
+    chrono.length >= 3 &&
+    chrono[chrono.length - 2].variant === 'Standard' &&
+    chrono[chrono.length - 3].variant === 'Standard'
+  ) {
+    return chrono[chrono.length - 2].entry
+  }
+
+  return realized[0] ?? null
 }
 
 export function getLatestSectionDate(
   exercises: readonly Exercise[],
   section: SectionId,
+  todayIso = todayISODate(),
 ): string | null {
   let latest: string | null = null
   for (const ex of exercises) {
     if (ex.section !== section) continue
     for (const entry of ex.entries) {
-      if (entry.skipOnly || !entry.date) continue
+      if (entry.skipOnly || !entry.date || isPendingObjective(entry, todayIso)) continue
       if (latest === null || entry.date > latest) {
         latest = entry.date
       }
@@ -86,11 +161,11 @@ export function getRecommendedSection(exercises: readonly Exercise[]): {
   }
 }
 
-export function computeExerciseDdpPlan(exercise: Exercise): ExercisePlan {
+export function computeExerciseDdpPlan(exercise: Exercise, variant?: string): ExercisePlan {
   const [minReps, maxReps] = exercise.repRange
   const step = exercise.unit === 'bodyweight' ? 0 : exercise.weightStep
   const restSeconds = exercise.defaultRestSeconds
-  const latest = getLatestEntry(exercise)
+  const latest = getLatestEntry(exercise, todayISODate(), variant)
 
   if (!latest || latest.sets.length === 0) {
     return {
@@ -112,15 +187,15 @@ export function computeExerciseDdpPlan(exercise: Exercise): ExercisePlan {
     workSets = latest.sets
   }
 
+  const firstWork = workSets[0]
   const targetSets: TargetSet[] = warmups.map((w) => ({
-    weight: w.weight,
+    weight: resolveIntendedWarmupWeight(w.weight, w.note, firstWork.weight),
     repsMin: Math.round(w.reps),
     repsMax: Math.round(w.reps),
     suggestedReps: Math.round(w.reps),
     isWarmup: true,
   }))
 
-  const firstWork = workSets[0]
   const s1HitTop = firstWork.reps >= maxReps && step > 0
   const s1Weight = s1HitTop ? roundWeight(firstWork.weight + step) : firstWork.weight
   const resetRepMax = Math.min(maxReps, minReps + 2)
@@ -184,6 +259,13 @@ export function computeExerciseDdpPlan(exercise: Exercise): ExercisePlan {
   } else {
     const targetRep = targetSets.find((s) => !s.isWarmup)?.suggestedReps ?? minReps
     tip = `Conserve ${formatNumberFr(s1Weight)}kg et vise +1 rep (objectif ${targetRep} reps en S1).`
+  }
+
+  const allNotes = [latest.note, ...latest.sets.map((s) => s.note ?? '')].join(' ')
+  if (/micro[\s-]*pause|petite\s*pause|quelques\s*secondes\s*de\s*pause/i.test(allNotes)) {
+    tip += ' Valide les reps d’une traite sans micro-pause.'
+  } else if (/1\s*(?:main|bras)?\s*par\s*1/i.test(allNotes)) {
+    tip += ' Même repère des deux côtés (1 par 1).'
   }
 
   return {

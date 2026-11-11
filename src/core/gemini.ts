@@ -1,4 +1,4 @@
-import { computeExerciseDdpPlan } from './ddp'
+import { computeExerciseDdpPlan, isPendingObjective } from './ddp'
 import { DEFAULT_NOTEPAD_PREAMBLE } from './defaultNotepad'
 import { inferExerciseMeta } from './parser'
 import { buildEnrichedChronology } from './statsEngine'
@@ -36,15 +36,18 @@ export function buildSectionPlanFingerprint(
   preamble = '',
 ): string {
   const activeExercises = exercises.filter((e) => e.section === section && e.active)
+  const today = todayISODate()
   const exSig = activeExercises
     .map((ex) => {
-      const realEntries = ex.entries.filter((e) => !e.skipOnly && e.sets.length > 0)
+      const realEntries = ex.entries.filter(
+        (e) => !e.skipOnly && e.sets.length > 0 && !isPendingObjective(e, today),
+      )
       const latest = realEntries[0]
       const setsSig = latest
         ? latest.sets
             .map(
               (s) =>
-                `${s.weight}x${s.reps}${s.isWarmup ? 'w' : ''}${s.failure ? 'f' : ''}`,
+                `${s.weight}x${s.reps}${s.isWarmup ? 'w' : ''}${s.failure ? 'f' : ''}${s.note ? `(${s.note})` : ''}`,
             )
             .join(',')
         : 'empty'
@@ -257,7 +260,13 @@ export async function generateGeminiSessionPlan(params: {
       const tipRaw = typeof rec.tip === 'string' ? rec.tip.trim() : ''
       const rationale = typeof rec.rationale === 'string' ? rec.rationale.trim() : ''
       // Le « pourquoi » du coach accompagne toujours la consigne, sans dépasser l'affichage mobile.
-      const tip = (tipRaw || rationale).slice(0, 140)
+      const combinedTip =
+        tipRaw &&
+        rationale &&
+        !tipRaw.toLowerCase().includes(rationale.slice(0, Math.min(20, rationale.length)).toLowerCase())
+          ? `${tipRaw.replace(/[.!?\s]+$/, '')} — ${rationale}`
+          : tipRaw || rationale
+      const tip = combinedTip.slice(0, 200)
 
       byId[ex.id] = guardExercisePlan(
         ex,

@@ -5,15 +5,18 @@ import {
   ChevronDown,
   Clock,
   Flame,
+  ListChecks,
+  Minus,
   Moon,
+  Plus,
   RotateCcw,
   SkipForward,
   Sparkles,
   Sun,
 } from 'lucide-react'
 import { HistoryValueInput } from '../components/HistoryValueInput'
-import { Popover, Toast, useDismiss } from '../components/motion'
-import { getRecommendedSection } from '../core/ddp'
+import { Collapse, Popover, Toast, useDismiss } from '../components/motion'
+import { formatExercisePlanInline, getExerciseVariants, getRecommendedSection } from '../core/ddp'
 import { isGeminiPlanFresh } from '../core/gemini'
 import type { SectionId } from '../core/types'
 import { useNow } from '../hooks/useNow'
@@ -58,16 +61,19 @@ export type ValuePerfState =
 export function computePerfState(params: {
   value: number
   target: number
+  targetMin?: number
   prev: number | null
   step: number
 }): ValuePerfState {
-  const { value, target, prev, step } = params
+  const { value, target, targetMin, prev, step } = params
   const eps = 0.01
+  const effectiveMin =
+    typeof targetMin === 'number' && targetMin <= target ? targetMin : target
 
   if (value > target + eps) {
     return 'above'
   }
-  if (Math.abs(value - target) <= eps) {
+  if (value >= effectiveMin - eps && value <= target + eps) {
     return 'target'
   }
   // En dessous de l'objectif mais égal à la dernière séance -> repère ambre
@@ -76,7 +82,7 @@ export function computePerfState(params: {
   }
   const safeStep = Math.max(0.5, step)
   const baseline =
-    prev !== null && prev < target - eps ? prev : target
+    prev !== null && prev < effectiveMin - eps ? prev : effectiveMin
   const stepsDown = Math.max(1, Math.ceil((baseline - value - eps) / safeStep))
   if (stepsDown === 1) return 'below-1'
   if (stepsDown === 2) return 'below-2'
@@ -168,7 +174,13 @@ export function WorkoutView() {
   const adjustWorkoutChrono = useWorkoutStore((s) => s.adjustWorkoutChrono)
   const setWorkoutChronoSeconds = useWorkoutStore((s) => s.setWorkoutChronoSeconds)
   const updateDraftSet = useWorkoutStore((s) => s.updateDraftSet)
-  const updateDraftNote = useWorkoutStore((s) => s.updateDraftNote)
+  const addSetToExercise = useWorkoutStore((s) => s.addSetToExercise)
+  const removeLastUncompletedSet = useWorkoutStore((s) => s.removeLastUncompletedSet)
+  const skipRemainingSetsOfCurrentExercise = useWorkoutStore(
+    (s) => s.skipRemainingSetsOfCurrentExercise,
+  )
+  const switchDraftExerciseVariant = useWorkoutStore((s) => s.switchDraftExerciseVariant)
+  const toggleExerciseActive = useWorkoutStore((s) => s.toggleExerciseActive)
   const saveCompletedWorkout = useWorkoutStore((s) => s.saveCompletedWorkout)
   const discardActiveWorkout = useWorkoutStore((s) => s.discardActiveWorkout)
   const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
@@ -177,6 +189,7 @@ export function WorkoutView() {
 
   const [showExercisePicker, setShowExercisePicker] = useState(false)
   const [showChronoEditor, setShowChronoEditor] = useState(false)
+  const [showSessionPreview, setShowSessionPreview] = useState(false)
   const [customChronoText, setCustomChronoText] = useState('')
   const savedToast = useWorkoutStore((s) => s.lastToast)
   const setSavedToast = useWorkoutStore((s) => s.setLastToast)
@@ -260,14 +273,62 @@ export function WorkoutView() {
     }
   }, [sessionPhase, restTimer, restRemainingMs, onRestCountdownReachedZero])
 
+  // Garde l'écran allumé pendant la séance (Wake Lock API) pour éviter la mise en veille pendant le chrono.
+  useEffect(() => {
+    if (sessionPhase !== 'working' && sessionPhase !== 'resting') return
+    if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return
+
+    let sentinel: { release?: () => Promise<void> } | null = null
+    let cancelled = false
+
+    const acquire = async () => {
+      try {
+        const wl = (
+          navigator as unknown as {
+            wakeLock?: { request: (type: 'screen') => Promise<{ release?: () => Promise<void> }> }
+          }
+        ).wakeLock
+        if (!wl || cancelled) return
+        sentinel = await wl.request('screen')
+      } catch {
+        // Wake Lock refusé ou indisponible
+      }
+    }
+
+    const onVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void acquire()
+      }
+    }
+
+    void acquire()
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+
+    return () => {
+      cancelled = true
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
+      void sentinel?.release?.().catch(() => {})
+    }
+  }, [sessionPhase])
+
   const validatedCount = activeExercises.reduce((acc, ex) => {
     const sets = activeDraft.logs[ex.id]?.sets ?? []
     return acc + sets.filter((s) => s.completedAt !== null).length
   }, 0)
 
   const totalSetsCount = activeExercises.reduce((acc, ex) => {
-    return acc + (activeDraft.logs[ex.id]?.sets.length ?? 0)
+    const sets = activeDraft.logs[ex.id]?.sets ?? []
+    return acc + sets.filter((s) => !s.skipped).length
   }, 0)
+
+  const pausedSectionExercises = exercises.filter(
+    (e) => e.section === section && !e.active,
+  )
+  const currentPlan = coachPlans[section]
 
   const toggleDarkMode = () => {
     updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })
@@ -426,6 +487,100 @@ export function WorkoutView() {
             >
               Effacer l&apos;essai
             </button>
+          </div>
+        )}
+
+        {/* Aperçu dépliable du programme et des consignes du coach sans démarrer le chrono */}
+        {activeExercises.length > 0 && (
+          <div className="mt-6 w-full max-w-md text-left">
+            <div className="text-center">
+              <button
+                type="button"
+                aria-expanded={showSessionPreview}
+                onClick={() => setShowSessionPreview((v) => !v)}
+                className="tap inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-200/60 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              >
+                <ListChecks className="h-3.5 w-3.5" />
+                Aperçu de la séance ({activeExercises.length} exos)
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform duration-300 ease-smooth ${
+                    showSessionPreview ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+            </div>
+
+            <Collapse open={showSessionPreview} className="mt-2">
+              <div className="space-y-2.5 rounded-2xl border border-slate-200/80 bg-white/90 p-3.5 shadow-sm dark:border-slate-800 dark:bg-slate-900/90">
+                {currentPlan?.summaryLines && currentPlan.summaryLines.length > 0 && (
+                  <ul className="space-y-1 border-b border-slate-100 pb-2.5 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-300">
+                    {currentPlan.summaryLines.map((line, i) => (
+                      <li key={i} className="flex items-start gap-1.5">
+                        <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-indigo-500" />
+                        <span>{line}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <div className="space-y-2">
+                  {activeExercises.map((ex, idx) => {
+                    const exPlan = currentPlan?.exercises[ex.id]
+                    return (
+                      <div
+                        key={ex.id}
+                        className="rounded-xl bg-slate-50/90 px-3 py-2 text-xs dark:bg-slate-800/60"
+                      >
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="font-bold text-slate-800 dark:text-slate-100">
+                            {idx + 1}. {ex.name}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => toggleExerciseActive(ex.id)}
+                            title="Mettre cet exercice en pause"
+                            className="shrink-0 text-[11px] font-medium text-slate-400 hover:text-rose-500"
+                          >
+                            Pause
+                          </button>
+                        </div>
+                        {exPlan && (
+                          <p className="mt-0.5 font-mono text-[11px] text-indigo-600 dark:text-indigo-300">
+                            {formatExercisePlanInline(exPlan, ex.unit)}
+                          </p>
+                        )}
+                        {exPlan?.tip && (
+                          <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                            {exPlan.tip}
+                          </p>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {pausedSectionExercises.length > 0 && (
+                  <details className="border-t border-slate-100 pt-2 text-xs dark:border-slate-800">
+                    <summary className="cursor-pointer font-semibold text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
+                      Exercices en pause ({pausedSectionExercises.length})
+                    </summary>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {pausedSectionExercises.map((ex) => (
+                        <button
+                          key={ex.id}
+                          type="button"
+                          onClick={() => toggleExerciseActive(ex.id)}
+                          className="tap inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                        >
+                          <Plus className="h-3 w-3" />
+                          {ex.name}
+                        </button>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            </Collapse>
           </div>
         )}
       </div>
@@ -747,12 +902,15 @@ export function WorkoutView() {
   const repsPerf = computePerfState({
     value: currentSet.reps,
     target: currentSet.targetReps,
+    targetMin: currentSet.targetRepsMin,
     prev: sameWeightAsPrev ? currentSet.prevReps : null,
     step: 1,
   })
 
   const wStyle = PERF_STYLES[weightPerf]
   const rStyle = PERF_STYLES[repsPerf]
+  const currentVariants = getExerciseVariants(currentEx)
+  const activeVariantLabel = currentLog?.note?.trim() || 'Standard'
 
   return (
     <div className="relative mx-auto flex min-h-[84vh] max-w-md animate-fade-in flex-col justify-between px-4 py-3">
@@ -798,8 +956,64 @@ export function WorkoutView() {
                 </button>
               )
             })}
+            {pausedSectionExercises.length > 0 && (
+              <div className="mt-1.5 border-t border-slate-100 pt-1.5 dark:border-slate-800">
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                  En réserve (machine occupée)
+                </p>
+                {pausedSectionExercises.map((ex) => (
+                  <button
+                    key={ex.id}
+                    type="button"
+                    onClick={() => {
+                      toggleExerciseActive(ex.id)
+                      setShowExercisePicker(false)
+                    }}
+                    className="flex w-full items-center justify-between rounded-xl px-3 py-1.5 text-left text-xs text-slate-500 transition-colors hover:bg-slate-50 hover:text-indigo-600 dark:text-slate-400 dark:hover:bg-slate-800/60 dark:hover:text-indigo-300"
+                  >
+                    <span className="truncate">{ex.name}</span>
+                    <span className="ml-2 shrink-0 font-semibold text-indigo-600 dark:text-indigo-400">
+                      + Ajouter
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-          <div className="mt-1 space-y-1 border-t border-slate-100 pt-1 dark:border-slate-800">
+          <div className="mt-1 space-y-1 border-t border-slate-100 pt-1.5 dark:border-slate-800">
+            <div className="grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                onClick={() => addSetToExercise(currentEx.id)}
+                className="inline-flex items-center justify-center gap-1 rounded-xl bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Ajouter série
+              </button>
+              <button
+                type="button"
+                disabled={
+                  sets.length <= 1 || sets.every((s) => s.completedAt !== null)
+                }
+                onClick={() => removeLastUncompletedSet(currentEx.id)}
+                className="inline-flex items-center justify-center gap-1 rounded-xl bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Minus className="h-3.5 w-3.5" />
+                Retirer série
+              </button>
+            </div>
+            {sets.some((s) => s.completedAt === null && !s.skipped) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExercisePicker(false)
+                  skipRemainingSetsOfCurrentExercise()
+                }}
+                className="w-full rounded-xl px-3 py-1.5 text-center text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-300"
+              >
+                Passer la fin de cet exercice
+              </button>
+            )}
             {validatedCount > 0 && (
               <button
                 type="button"
@@ -834,6 +1048,23 @@ export function WorkoutView() {
         key={`${currentEx.id}-${cursor.setIdx}`}
         className="my-auto animate-fade-up py-2"
       >
+        {workoutElapsedSeconds >= 3600 && (
+          <div
+            data-testid="duration-fatigue-banner"
+            className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-1.5 text-[11px] font-medium text-amber-800 dark:text-amber-300"
+          >
+            <span>Séance &gt; 1h — hydrate-toi ou allège la fin si la fatigue monte.</span>
+            {sets.some((s) => s.completedAt === null && !s.skipped) && (
+              <button
+                type="button"
+                onClick={skipRemainingSetsOfCurrentExercise}
+                className="shrink-0 rounded-lg bg-amber-500/20 px-2 py-0.5 font-semibold hover:bg-amber-500/30"
+              >
+                Passer fin exo
+              </button>
+            )}
+          </div>
+        )}
         <div className="text-center">
           <span
             className={`inline-block rounded-full px-3 py-0.5 text-xs font-semibold ${
@@ -848,6 +1079,31 @@ export function WorkoutView() {
           <h2 className="mt-2.5 text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
             {currentEx.name}
           </h2>
+          {currentVariants.length > 1 && (
+            <div
+              data-testid="variant-switcher"
+              className="mt-2 flex flex-wrap items-center justify-center gap-1"
+            >
+              {currentVariants.map((variant) => {
+                const isSelected = activeVariantLabel === variant
+                return (
+                  <button
+                    key={variant}
+                    type="button"
+                    aria-label={`Variante ${variant}`}
+                    onClick={() => switchDraftExerciseVariant(currentEx.id, variant)}
+                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'bg-slate-100 text-slate-500 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    {variant}
+                  </button>
+                )
+              })}
+            </div>
+          )}
           {currentTip ? (
             <p
               data-testid="coach-tip"
@@ -968,12 +1224,14 @@ export function WorkoutView() {
           </div>
         </div>
 
-        {/* Ligne épurée : Commentaire + Échec discret */}
+        {/* Ligne épurée : Commentaire de la série en cours + Échec discret */}
         <div className="mt-5 flex items-center gap-2">
           <input
             type="text"
-            value={currentLog?.note ?? ''}
-            onChange={(e) => updateDraftNote(currentEx.id, e.target.value)}
+            value={currentSet.note ?? ''}
+            onChange={(e) =>
+              updateDraftSet(currentEx.id, currentSet.id, { note: e.target.value })
+            }
             placeholder="Commentaire"
             className="w-full rounded-xl border border-slate-200/90 bg-white/90 px-3.5 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 dark:border-slate-800 dark:bg-slate-900/90 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:ring-indigo-400/10"
           />
@@ -996,6 +1254,37 @@ export function WorkoutView() {
             <Flame className="h-3.5 w-3.5" />
             Échec
           </button>
+        </div>
+
+        {/* Pastilles rapides (unilatéral, micro-pause, réserve) en 1 tap */}
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {(['1 main par 1 main', 'micro-pause', 'facile'] as const).map((tag) => {
+            const noteText = currentSet.note ?? ''
+            const hasTag = noteText.toLowerCase().includes(tag.toLowerCase())
+            return (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => {
+                  const nextNote = hasTag
+                    ? noteText
+                        .replace(new RegExp(`(?:^|\\s*·\\s*|\\s+)${tag}`, 'i'), '')
+                        .trim()
+                    : noteText.trim()
+                      ? `${noteText.trim()} · ${tag}`
+                      : tag
+                  updateDraftSet(currentEx.id, currentSet.id, { note: nextNote })
+                }}
+                className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                  hasTag
+                    ? 'bg-indigo-500/15 text-indigo-700 dark:bg-indigo-500/25 dark:text-indigo-300'
+                    : 'bg-slate-100 text-slate-500 hover:bg-slate-200/80 dark:bg-slate-800/70 dark:text-slate-400 dark:hover:bg-slate-800'
+                }`}
+              >
+                + {tag}
+              </button>
+            )
+          })}
         </div>
       </div>
 

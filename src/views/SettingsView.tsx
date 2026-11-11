@@ -1,5 +1,19 @@
 import { useRef, useState } from 'react'
-import { ArrowLeft, Eye, EyeOff, FlaskConical, Loader2, Moon, Sun, Trash2, Wifi } from 'lucide-react'
+import {
+  ArrowLeft,
+  Bell,
+  Download,
+  Eye,
+  EyeOff,
+  FlaskConical,
+  Loader2,
+  Moon,
+  Sun,
+  Trash2,
+  Upload,
+  Vibrate,
+  Wifi,
+} from 'lucide-react'
 import {
   DEFAULT_GEMINI_MODEL,
   SUGGESTED_GEMINI_MODELS,
@@ -35,12 +49,16 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
   const clearApiKey = useWorkoutStore((s) => s.clearApiKey)
   const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
   const startSimulation = useWorkoutStore((s) => s.startSimulation)
+  const exportBackupJson = useWorkoutStore((s) => s.exportBackupJson)
+  const restoreFromBackupJson = useWorkoutStore((s) => s.restoreFromBackupJson)
 
   const initialKeyRef = useRef(settings.apiKey)
+  const backupFileRef = useRef<HTMLInputElement | null>(null)
   const [showKey, setShowKey] = useState(false)
   const [testing, setTesting] = useState(false)
   const [status, setStatus] = useState<ConnectionTestResult | null>(null)
   const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [backupMessage, setBackupMessage] = useState<{ ok: boolean; text: string } | null>(null)
 
   const cleanedKey = sanitizeApiKey(settings.apiKey)
   const detectedProvider = cleanedKey ? detectApiProvider(cleanedKey) : null
@@ -255,6 +273,112 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
               </p>
             ) : null}
           </div>
+        ) : null}
+      </section>
+
+      <section className={CARD} aria-labelledby="settings-alerts">
+        <h2 id="settings-alerts" className="text-sm font-extrabold text-slate-900 dark:text-white">
+          Fin de pause
+        </h2>
+
+        <label className="flex cursor-pointer items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-200">
+          <span className="inline-flex items-center gap-2">
+            <Bell size={15} className="text-indigo-500" />
+            Son à la fin du repos (0:00)
+          </span>
+          <input
+            type="checkbox"
+            checked={settings.soundEnabled}
+            onChange={(e) => updateSettings({ soundEnabled: e.target.checked })}
+            className="h-4 w-4 rounded accent-indigo-600"
+          />
+        </label>
+
+        <label className="flex cursor-pointer items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-200">
+          <span className="inline-flex items-center gap-2">
+            <Vibrate size={15} className="text-indigo-500" />
+            Vibration à la fin du repos
+          </span>
+          <input
+            type="checkbox"
+            checked={settings.vibrationEnabled}
+            onChange={(e) => updateSettings({ vibrationEnabled: e.target.checked })}
+            className="h-4 w-4 rounded accent-indigo-600"
+          />
+        </label>
+      </section>
+
+      <section className={CARD} aria-labelledby="settings-backup">
+        <h2 id="settings-backup" className="text-sm font-extrabold text-slate-900 dark:text-white">
+          Sauvegarde complète (.json)
+        </h2>
+        <p className="text-xs font-medium leading-relaxed text-slate-500 dark:text-slate-400">
+          Exporte ou restaure l’intégralité des séances, chronométrages et préférences (sans exposer ta clé API).
+        </p>
+
+        <input
+          ref={backupFileRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={async (e) => {
+            const file = e.target.files?.[0]
+            e.target.value = ''
+            if (!file) return
+            try {
+              const text = await file.text()
+              restoreFromBackupJson(text)
+              setBackupMessage({ ok: true, text: 'Sauvegarde restaurée avec succès.' })
+            } catch (err) {
+              setBackupMessage({
+                ok: false,
+                text: err instanceof Error ? err.message : 'Sauvegarde invalide.',
+              })
+            }
+          }}
+        />
+
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const json = exportBackupJson({ includeApiKey: false })
+              const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
+              const url = URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url
+              a.download = 'sport-ddp-sauvegarde.json'
+              a.click()
+              URL.revokeObjectURL(url)
+              setBackupMessage({ ok: true, text: 'Sauvegarde téléchargée.' })
+            }}
+            className={SECONDARY_BUTTON}
+          >
+            <Download size={14} />
+            Exporter
+          </button>
+
+          <button
+            type="button"
+            onClick={() => backupFileRef.current?.click()}
+            className={SECONDARY_BUTTON}
+          >
+            <Upload size={14} />
+            Importer
+          </button>
+        </div>
+
+        {backupMessage ? (
+          <p
+            role="status"
+            className={`text-center text-xs font-semibold ${
+              backupMessage.ok
+                ? 'text-emerald-600 dark:text-emerald-400'
+                : 'text-rose-600 dark:text-rose-400'
+            }`}
+          >
+            {backupMessage.text}
+          </p>
         ) : null}
       </section>
 

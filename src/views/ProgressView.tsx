@@ -4,6 +4,7 @@ import { Collapse } from '../components/motion'
 import { ProgressionChart, type ChartMetric } from '../components/ProgressionChart'
 import { buildStatsFingerprint } from '../core/gemini'
 import { copyText } from '../core/clipboard'
+import { formatEntryForNotepad } from '../core/parser'
 import {
   buildEnrichedChronology,
   computeSmartExerciseInsight,
@@ -112,7 +113,9 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const profileHeightCm = useWorkoutStore((s) => s.settings.profileHeightCm)
   const profileWeightKg = useWorkoutStore((s) => s.settings.profileWeightKg)
   const deleteHistoryEntry = useWorkoutStore((s) => s.deleteHistoryEntry)
+  const updateHistoryEntry = useWorkoutStore((s) => s.updateHistoryEntry)
   const deleteCompletedSession = useWorkoutStore((s) => s.deleteCompletedSession)
+  const toggleExerciseActive = useWorkoutStore((s) => s.toggleExerciseActive)
 
   const exercises = getExercisesWithLiveProgress()
 
@@ -120,6 +123,12 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const [expandedExId, setExpandedExId] = useState<string | null>(null)
   const [showHistoryExId, setShowHistoryExId] = useState<string | null>(null)
   const [showRecentTimings, setShowRecentTimings] = useState(false)
+  const [showInactiveExercises, setShowInactiveExercises] = useState(false)
+  const [editingEntry, setEditingEntry] = useState<{
+    exerciseId: string
+    entryId: string
+    text: string
+  } | null>(null)
   const [metric, setMetric] = useState<ChartMetric>('maxWeight')
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
 
@@ -136,6 +145,11 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
 
   const sectionExercises = useMemo(
     () => exercises.filter((e) => e.section === section && e.active),
+    [exercises, section],
+  )
+
+  const inactiveSectionExercises = useMemo(
+    () => exercises.filter((e) => e.section === section && !e.active),
     [exercises, section],
   )
 
@@ -597,56 +611,124 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                       <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
                         {chronoDesc.map((item, itemIdx) => {
                           const entry = item.entry
+                          const isEditingThis =
+                            editingEntry?.exerciseId === ex.id &&
+                            editingEntry?.entryId === entry.id
                           return (
                             <div
                               key={entry.id}
                               style={{ animationDelay: `${Math.min(itemIdx * 25, 150)}ms` }}
-                              className="flex animate-fade-up items-start justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
+                              className="animate-fade-up rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
                             >
-                              <div className="min-w-0 space-y-0.5">
-                                <div className="flex flex-wrap items-center gap-1.5">
-                                  <span className="font-bold text-slate-700 dark:text-slate-200">
-                                    {item.displayDate}
-                                  </span>
-                                  {item.variant !== 'Standard' ? (
-                                    <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-300">
-                                      {item.variant}
-                                    </span>
-                                  ) : null}
-                                  <span className="text-slate-300 dark:text-slate-600">
-                                    ·
-                                  </span>
-                                  <span className="font-mono text-slate-700 dark:text-slate-300">
-                                    {item.setsDisplay}
-                                  </span>
-                                  {entry.restSeconds ? (
-                                    <span className="text-[11px] text-slate-400">
-                                      · repos {formatRestDuration(entry.restSeconds)}
-                                    </span>
-                                  ) : null}
-                                  {entry.workSeconds ? (
-                                    <span className="text-[11px] text-slate-400">
-                                      · effort {formatDurationShort(entry.workSeconds)}
-                                    </span>
+                              {isEditingThis ? (
+                                <div className="space-y-1.5">
+                                  <input
+                                    type="text"
+                                    aria-label={`Ligne de la séance ${item.displayDate}`}
+                                    value={editingEntry.text}
+                                    onChange={(e) =>
+                                      setEditingEntry({
+                                        ...editingEntry,
+                                        text: e.target.value,
+                                      })
+                                    }
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-800 focus:border-indigo-400 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                                  />
+                                  <div className="flex justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingEntry(null)}
+                                      className="rounded-lg px-2.5 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-700"
+                                    >
+                                      Annuler
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (
+                                          updateHistoryEntry(
+                                            ex.id,
+                                            entry.id,
+                                            editingEntry.text,
+                                          )
+                                        ) {
+                                          setEditingEntry(null)
+                                        }
+                                      }}
+                                      className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500"
+                                    >
+                                      Enregistrer
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0 space-y-0.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="font-bold text-slate-700 dark:text-slate-200">
+                                        {item.displayDate}
+                                      </span>
+                                      {item.variant !== 'Standard' ? (
+                                        <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-300">
+                                          {item.variant}
+                                        </span>
+                                      ) : null}
+                                      <span className="text-slate-300 dark:text-slate-600">
+                                        ·
+                                      </span>
+                                      <span className="font-mono text-slate-700 dark:text-slate-300">
+                                        {item.setsDisplay}
+                                      </span>
+                                      {entry.restSeconds ? (
+                                        <span className="text-[11px] text-slate-400">
+                                          · repos {formatRestDuration(entry.restSeconds)}
+                                        </span>
+                                      ) : null}
+                                      {entry.workSeconds ? (
+                                        <span className="text-[11px] text-slate-400">
+                                          · effort {formatDurationShort(entry.workSeconds)}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    {entry.note ? (
+                                      <p className="italic text-slate-500 dark:text-slate-400">
+                                        {entry.note}
+                                      </p>
+                                    ) : null}
+                                  </div>
+
+                                  {!entry.id.startsWith('live-') ? (
+                                    <div className="flex shrink-0 items-center gap-0.5">
+                                      <button
+                                        type="button"
+                                        aria-label={`Modifier la séance ${item.displayDate}`}
+                                        onClick={() =>
+                                          setEditingEntry({
+                                            exerciseId: ex.id,
+                                            entryId: entry.id,
+                                            text: formatEntryForNotepad(entry, ex.unit).replace(
+                                              /^•\s*/,
+                                              '',
+                                            ),
+                                          })
+                                        }
+                                        title="Modifier cette entrée"
+                                        className="rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 transition-all duration-200 hover:bg-indigo-50 hover:text-indigo-600 active:scale-90 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300"
+                                      >
+                                        ✎
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => deleteHistoryEntry(ex.id, entry.id)}
+                                        title="Supprimer cette entrée"
+                                        className="rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 transition-all duration-200 hover:bg-rose-50 hover:text-rose-600 active:scale-90 dark:hover:bg-rose-950/40"
+                                      >
+                                        ×
+                                      </button>
+                                    </div>
                                   ) : null}
                                 </div>
-                                {entry.note ? (
-                                  <p className="italic text-slate-500 dark:text-slate-400">
-                                    {entry.note}
-                                  </p>
-                                ) : null}
-                              </div>
-
-                              {!entry.id.startsWith('live-') ? (
-                                <button
-                                  type="button"
-                                  onClick={() => deleteHistoryEntry(ex.id, entry.id)}
-                                  title="Supprimer cette entrée"
-                                  className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 transition-all duration-200 hover:bg-rose-50 hover:text-rose-600 active:scale-90 dark:hover:bg-rose-950/40"
-                                >
-                                  ×
-                                </button>
-                              ) : null}
+                              )}
                             </div>
                           )
                         })}
@@ -659,6 +741,120 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
           )
         })}
       </div>
+
+      {/* Exercices secondaires / archivés dépliables à la demande */}
+      {inactiveSectionExercises.length > 0 && (
+        <div className="pt-2">
+          <button
+            type="button"
+            aria-expanded={showInactiveExercises}
+            onClick={() => setShowInactiveExercises((v) => !v)}
+            className="tap flex w-full items-center justify-between rounded-2xl border border-dashed border-slate-200 px-4 py-3 text-xs font-semibold text-slate-500 hover:border-slate-300 hover:text-slate-800 dark:border-slate-800 dark:text-slate-400 dark:hover:border-slate-700 dark:hover:text-slate-200"
+          >
+            <span>
+              Exercices en pause ou archivés ({inactiveSectionExercises.length})
+            </span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform duration-300 ease-smooth ${
+                showInactiveExercises ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+
+          <Collapse open={showInactiveExercises} className="mt-2">
+            <div className="space-y-2">
+              {inactiveSectionExercises.map((ex) => {
+                const isOpen = expandedExId === ex.id
+                const showHistory = showHistoryExId === ex.id
+                const latestSummary = getLatestBestSetSummary(ex)
+                const realSessionsCount = ex.entries.filter(
+                  (e) => !e.skipOnly && e.sets.length > 0,
+                ).length
+                const chronoDesc = getChronoDesc(ex, isOpen && showHistory)
+
+                return (
+                  <div
+                    key={ex.id}
+                    className="overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 dark:border-slate-800 dark:bg-slate-900/80"
+                  >
+                    <div className="flex items-center justify-between gap-2 px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExpandedExId(isOpen ? null : ex.id)
+                          setShowHistoryExId(null)
+                        }}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <p className="truncate text-sm font-semibold text-slate-700 dark:text-slate-200">
+                          {ex.name}
+                        </p>
+                        <p className="mt-0.5 text-xs text-slate-400">
+                          {realSessionsCount > 0
+                            ? `${realSessionsCount} séance${realSessionsCount > 1 ? 's' : ''} · Dernière : ${latestSummary}`
+                            : 'Aucune séance enregistrée'}
+                        </p>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => toggleExerciseActive(ex.id)}
+                        className="press shrink-0 rounded-xl border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-950/40 dark:text-indigo-300"
+                      >
+                        Réactiver
+                      </button>
+                    </div>
+
+                    <Collapse open={isOpen}>
+                      <div className="space-y-3 border-t border-slate-100 px-4 pb-4 pt-3 dark:border-slate-800">
+                        <ProgressionChart exercise={ex} metric={metric} />
+                        {realSessionsCount > 0 && (
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setShowHistoryExId(showHistory ? null : ex.id)
+                              }
+                              className="tap text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
+                            >
+                              {showHistory
+                                ? 'Masquer les séances'
+                                : `Voir les ${realSessionsCount} séances`}
+                            </button>
+                            <Collapse open={showHistory} className="mt-2">
+                              <div className="max-h-60 space-y-1.5 overflow-y-auto pr-1">
+                                {chronoDesc.map((item) => (
+                                  <div
+                                    key={item.entry.id}
+                                    className="rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
+                                  >
+                                    <span className="font-bold text-slate-700 dark:text-slate-200">
+                                      {item.displayDate}
+                                    </span>{' '}
+                                    ·{' '}
+                                    <span className="font-mono text-slate-600 dark:text-slate-300">
+                                      {item.setsDisplay}
+                                    </span>
+                                    {item.entry.note && (
+                                      <p className="mt-0.5 italic text-slate-500 dark:text-slate-400">
+                                        {item.entry.note}
+                                      </p>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </Collapse>
+                          </div>
+                        )}
+                      </div>
+                    </Collapse>
+                  </div>
+                )
+              })}
+            </div>
+          </Collapse>
+        </div>
+      )}
     </div>
   )
 }
