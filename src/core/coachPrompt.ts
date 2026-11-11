@@ -142,7 +142,8 @@ SORTIE : JSON strict conforme au schéma
 - sets : dans l'ordre d'exécution ; weight en kg (0 au poids du corps) ; reps_min et reps_max = fourchette de la série ; target_reps = objectif précis du jour.
 - rest_seconds : repos entre séries de travail.
 - tip : une consigne concrète de moins de 120 caractères (ce qui change aujourd'hui et pourquoi).
-- summary_lines : 2 à 4 phrases courtes en français, virgule décimale (« 22,5 kg »), sur les choix principaux.
+- summary_lines : 2 à 4 phrases courtes en français, en tutoyant l'athlète, virgule décimale (« 22,5 kg »), sur les choix principaux.
+- Exactement autant de séries de travail que la base DDP calculée pour chaque exercice.
 
 CONSIGNES DE L'ATHLÈTE
 ${athleteRules.trim() || '(aucune)'}
@@ -168,6 +169,13 @@ export function guardExercisePlan(ex: Exercise, ai: ExercisePlan, ddp: ExerciseP
 
   if (aiWork.length === 0) return fallback
   if (ddpWork.length > 0 && Math.abs(aiWork.length - ddpWork.length) > 1) return fallback
+  // Même nombre de séries de travail qu'à l'habitude : série manquante reprise de la base DDP, série en trop retirée.
+  let countFixed = false
+  if (ddpWork.length > 0 && aiWork.length !== ddpWork.length) {
+    countFixed = true
+    if (aiWork.length > ddpWork.length) aiWork.length = ddpWork.length
+    else aiWork.push(...ddpWork.slice(aiWork.length))
+  }
 
   const recentWork = realEntries(ex)
     .slice(0, COACH_HISTORY_DEPTH)
@@ -192,5 +200,6 @@ export function guardExercisePlan(ex: Exercise, ai: ExercisePlan, ddp: ExerciseP
   if (warmupsBroken) {
     return { plan: { ...ai, sets: [...ddpWarmups, ...aiWork] }, corrected: true }
   }
+  if (countFixed) return { plan: { ...ai, sets: [...aiWarmups, ...aiWork] }, corrected: true }
   return { plan: ai, corrected: false }
 }
