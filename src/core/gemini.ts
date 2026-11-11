@@ -184,6 +184,12 @@ interface RawGeminiPlanJson {
 }
 
 export const COACH_REQUEST_TAG = 'coach-plan'
+export const STATS_REQUEST_TAG = 'stats-analysis'
+
+/** Tag par section : une modification de Jambes n'annule pas la pré-génération de Haut. */
+export function coachRequestTag(section: SectionId): string {
+  return `${COACH_REQUEST_TAG}:${section}`
+}
 
 export async function generateGeminiSessionPlan(params: {
   section: SectionId
@@ -191,6 +197,8 @@ export async function generateGeminiSessionPlan(params: {
   preamble?: string
   settings: Pick<AppSettings, 'apiKey' | 'profileHeightCm' | 'profileWeightKg'>
   priority?: 'high' | 'normal'
+  /** Vrai quand l'historique a changé : la requête en file ne part pas (zéro quota). */
+  isStale?: () => boolean
 }): Promise<CoachSessionPlan> {
   const { section, exercises, preamble, settings, priority = 'normal' } = params
   const activeExercises = exercises.filter((e) => e.section === section && e.active)
@@ -202,7 +210,8 @@ export async function generateGeminiSessionPlan(params: {
     prompt,
     responseSchema: COACH_PLAN_SCHEMA,
     priority,
-    tag: COACH_REQUEST_TAG,
+    tag: coachRequestTag(section),
+    isStale: params.isStale,
   })
 
   let parsed: RawGeminiPlanJson
@@ -496,6 +505,8 @@ export async function analyzeStatsWithGemini(params: {
   exercises: readonly Exercise[]
   completedSessions?: readonly CompletedSessionRecord[]
   apiKey: string
+  /** Vrai quand l'historique a changé : la requête en file ne part pas (zéro quota). */
+  isStale?: () => boolean
 }): Promise<AiStatsAnalysis> {
   const { exercises, completedSessions = [], apiKey } = params
   const activeExercises = exercises.filter((e) => e.active)
@@ -560,6 +571,8 @@ ${JSON.stringify(payload)}`
     // Réflexion HIGH : mesuré 2 à 4 min sur un historique complet, et plus de repli possible.
     timeoutMs: 300_000,
     priority: 'normal',
+    tag: STATS_REQUEST_TAG,
+    isStale: params.isStale,
   })
 
   const parsed = JSON.parse(responseText) as {

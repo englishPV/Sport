@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   configureGemini,
   GeminiError,
+  cancelQueuedGeminiRequests,
   generateJson,
   isSupportedGeminiModel,
   resetGeminiClientState,
@@ -218,6 +219,53 @@ describe('bouton « Tester la clé »', () => {
 
     expect(res.ok).toBe(true)
     expect(res.message).toContain('gemini-3.8-flash · HIGH')
+  })
+
+  it('n’envoie jamais une requête devenue périmée en file : zéro quota consommé', async () => {
+    let release: (() => void) | null = null
+    const mock = stubFetch(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(ok())
+        }),
+    )
+
+    const first = generateJson({ apiKey: AQ_KEY, prompt: 'a' })
+    // Deuxième requête mise en file alors que la première tourne : elle est périmée avant son tour.
+    const second = generateJson({ apiKey: AQ_KEY, prompt: 'b', isStale: () => true })
+
+    await vi.waitFor(() => expect(generationUrls(mock)).toHaveLength(1))
+    release!()
+    await first
+
+    await expect(second).rejects.toMatchObject({ kind: 'cancelled' })
+    expect(generationUrls(mock)).toHaveLength(1)
+  })
+
+  it('annule les requêtes en file d’une seule section, pas celles de l’autre', async () => {
+    let release: (() => void) | null = null
+    let calls = 0
+    const mock = stubFetch(() => {
+      calls += 1
+      if (calls > 1) return ok()
+      return new Promise((resolve) => {
+        release = () => resolve(ok())
+      })
+    })
+
+    const running = generateJson({ apiKey: AQ_KEY, prompt: 'a' })
+    const legs = generateJson({ apiKey: AQ_KEY, prompt: 'b', tag: 'coach-plan:legs' })
+    const up = generateJson({ apiKey: AQ_KEY, prompt: 'c', tag: 'coach-plan:up' })
+
+    await vi.waitFor(() => expect(generationUrls(mock)).toHaveLength(1))
+    cancelQueuedGeminiRequests('coach-plan:legs')
+    await expect(legs).rejects.toMatchObject({ kind: 'cancelled' })
+
+    release!()
+    await running
+    await up
+
+    expect(generationUrls(mock)).toHaveLength(2)
   })
 
   it('rend un message clair, sans exception, quand rien ne répond', async () => {

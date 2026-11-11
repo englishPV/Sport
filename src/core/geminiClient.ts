@@ -182,6 +182,8 @@ function candidateChannels(cleanKey: string, model: string): ConcreteChannel[] {
 interface QueuedTask {
   run: () => Promise<unknown>
   tag: string
+  /** Vrai quand les données ont changé depuis la mise en file : la requête ne doit pas partir. */
+  isStale?: () => boolean
   resolve: (value: unknown) => void
   reject: (reason: unknown) => void
 }
@@ -193,7 +195,14 @@ const pendingQueue: QueuedTask[] = []
 
 function drainQueue(): void {
   if (queueBusy) return
-  const task = pendingQueue.shift()
+  // Une requête en file dont les données ont changé entre-temps ne consomme pas de quota :
+  // elle est annulée avant même le premier appel réseau (la génération en cours, elle,
+  // ne peut pas être interrompue proprement et son résultat est jeté par l'appelant).
+  let task = pendingQueue.shift()
+  while (task && task.isStale?.()) {
+    task.reject(new GeminiError('cancelled', 'Requête annulée (données modifiées).'))
+    task = pendingQueue.shift()
+  }
   if (!task) return
   queueBusy = true
   const generation = queueGeneration
@@ -208,9 +217,20 @@ function drainQueue(): void {
 }
 
 /** Une seule requête à la fois : évite les 429 du palier gratuit. */
-function enqueue<T>(run: () => Promise<T>, priority: 'high' | 'normal', tag = ''): Promise<T> {
+function enqueue<T>(
+  run: () => Promise<T>,
+  priority: 'high' | 'normal',
+  tag = '',
+  isStale?: () => boolean,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const task: QueuedTask = { run, tag, resolve: resolve as (v: unknown) => void, reject }
+    const task: QueuedTask = {
+      run,
+      tag,
+      isStale,
+      resolve: resolve as (v: unknown) => void,
+      reject,
+    }
     if (priority === 'high') pendingQueue.unshift(task)
     else pendingQueue.push(task)
     drainQueue()
@@ -551,6 +571,8 @@ export async function generateJson(params: {
   priority?: 'high' | 'normal'
   /** Permet d'annuler en bloc les requêtes d'une même famille encore en file. */
   tag?: string
+  /** Vrai quand les données ont changé : la requête en file ne part pas (zéro quota). */
+  isStale?: () => boolean
   model?: string
 }): Promise<GeminiJsonResult> {
   const cleanKey = sanitizeApiKey(params.apiKey)
@@ -569,6 +591,7 @@ export async function generateJson(params: {
       }),
     params.priority ?? 'normal',
     params.tag,
+    params.isStale,
   )
 }
 
@@ -579,6 +602,8 @@ export async function postGenerateContent(params: {
   responseSchema: Record<string, unknown>
   timeoutMs?: number
   priority?: 'high' | 'normal'
+  tag?: string
+  isStale?: () => boolean
 }): Promise<string> {
   return (await generateJson(params)).text
 }

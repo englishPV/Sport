@@ -22,9 +22,11 @@ import {
 } from '../core/ddp'
 import {
   DEFAULT_GEMINI_MODEL,
+  STATS_REQUEST_TAG,
   analyzeStatsWithGemini,
   buildSectionPlanFingerprint,
   buildStatsFingerprint,
+  coachRequestTag,
   configureGemini,
   generateGeminiSessionPlan,
   isGeminiPlanFresh,
@@ -33,7 +35,6 @@ import {
   resetGeminiClientState,
   sanitizeApiKey,
 } from '../core/gemini'
-import { COACH_REQUEST_TAG } from '../core/gemini'
 import { GeminiError, cancelQueuedGeminiRequests } from '../core/geminiClient'
 import { hasUnrecognizedWorkoutText, parseNotepad } from '../core/parser'
 import { computeSetRestDuration, getOptimalExtraRestSeconds } from '../core/restScience'
@@ -73,11 +74,43 @@ export interface UndoSnapshot {
 let storeEpoch = 0
 const inFlightCoachBySection: Partial<Record<SectionId, Promise<void>>> = {}
 
+/**
+ * Anti-spam quota : après un échec (429, surcharge, délai…), les déclencheurs
+ * automatiques (clic Haut/Jambes, démarrage, retour des réglages…) ne repartent
+ * pas immédiatement. Sans cela, chaque clic relançait jusqu'à 2 générations HIGH
+ * (2 à 4 min chacune) qui échouaient en boucle sans rien afficher d'utile.
+ * Le bouton « Réessayer » explicite passe en force et contourne le délai.
+ */
+const COACH_FAILURE_COOLDOWN_MS = 60_000
+const STATS_FAILURE_COOLDOWN_MS = 60_000
+const lastCoachFailureAt: Partial<Record<SectionId, number>> = {}
+let lastStatsFailureAt = 0
+
+function coachCooldownRemainingMs(section: SectionId): number {
+  const at = lastCoachFailureAt[section]
+  if (!at) return 0
+  return Math.max(0, COACH_FAILURE_COOLDOWN_MS - (Date.now() - at))
+}
+
+function clearCoachFailure(section: SectionId): void {
+  delete lastCoachFailureAt[section]
+}
+
+function clearAllAiFailures(): void {
+  delete lastCoachFailureAt.up
+  delete lastCoachFailureAt.legs
+  lastStatsFailureAt = 0
+}
+
 function clearInFlightCoachTracking(): void {
   // Les plans encore en file portent sur des données dépassées : inutile de les envoyer.
-  cancelQueuedGeminiRequests(COACH_REQUEST_TAG)
+  cancelQueuedGeminiRequests(coachRequestTag('up'))
+  cancelQueuedGeminiRequests(coachRequestTag('legs'))
+  cancelQueuedGeminiRequests(STATS_REQUEST_TAG)
   delete inFlightCoachBySection.up
   delete inFlightCoachBySection.legs
+  // Données neuves (import, restauration, test…) : l'ancien échec ne bloque plus.
+  clearAllAiFailures()
 }
 
 function hasSectionHistory(exercises: readonly Exercise[], section: SectionId): boolean {
@@ -441,9 +474,12 @@ export interface WorkoutStoreState {
 
   askGeminiCoach: (
     section: SectionId,
-    options?: { priority?: 'high' | 'normal' },
+    options?: { priority?: 'high' | 'normal'; force?: boolean },
   ) => Promise<void>
-  ensureSessionPlansGenerated: (primarySection: SectionId) => Promise<void>
+  ensureSessionPlansGenerated: (
+    primarySection: SectionId,
+    options?: { force?: boolean },
+  ) => Promise<void>
   refreshAiStats: (force?: boolean) => Promise<void>
   deleteHistoryEntry: (exerciseId: string, entryId: string) => void
   updateHistoryEntry: (exerciseId: string, entryId: string, rawLineText: string) => boolean
@@ -1384,6 +1420,10 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           return existingPromise
         }
 
+        // Délai anti-spam après échec : les déclencheurs automatiques attendent,
+        // seul un « Réessayer » explicite (force) repart tout de suite.
+        if (!options.force && coachCooldownRemainingMs(section) > 0) return
+
         const myEpoch = storeEpoch
         const requestFingerprint = buildSectionPlanFingerprint(
           state.exercises,
@@ -1410,6 +1450,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
               preamble: state.preamble,
               settings: state.settings,
               priority: options.priority ?? 'normal',
+              // En file derrière une autre génération : si l'historique a changé
+              // d'ici là, la requête ne part pas du tout (zéro quota consommé).
+              isStale: () =>
+                buildSectionPlanFingerprint(get().exercises, section, get().preamble) !==
+                requestFingerprint,
             })
 
             if (storeEpoch !== myEpoch) return
@@ -1425,6 +1470,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
               return
             }
 
+            clearCoachFailure(section)
             const updatedPlans = { ...latestState.coachPlans, [section]: plan }
             const nextDraft =
               latestState.activeDraft.section === section
@@ -1446,7 +1492,10 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             })
           } catch (err) {
             if (storeEpoch !== myEpoch) return
+            // Annulée car remplacée par des données plus récentes : pas un échec,
+            // pas de délai, pas de message d'erreur.
             if (err instanceof GeminiError && err.kind === 'cancelled') return
+            lastCoachFailureAt[section] = Date.now()
             set({
               aiError: err instanceof Error ? err.message : 'Erreur Gemini.',
             })
@@ -1473,10 +1522,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         return taskPromise
       },
 
-      ensureSessionPlansGenerated: async (primarySection) => {
+      ensureSessionPlansGenerated: async (primarySection, options = {}) => {
         const state = get()
         if (!sanitizeApiKey(state.settings.apiKey)) return
 
+        const force = options.force === true
         const nextSection: SectionId = primarySection === 'legs' ? 'up' : 'legs'
         const tasks: Promise<void>[] = []
 
@@ -1490,7 +1540,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             state.preamble,
           )
         ) {
-          tasks.push(get().askGeminiCoach(primarySection, { priority: 'high' }))
+          tasks.push(get().askGeminiCoach(primarySection, { priority: 'high', force }))
         }
 
         // Et on pré-génère automatiquement la prochaine séance opposée (ex: Up quand on presse Jambes)
@@ -1504,7 +1554,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             state.preamble,
           )
         ) {
-          tasks.push(get().askGeminiCoach(nextSection, { priority: 'normal' }))
+          tasks.push(get().askGeminiCoach(nextSection, { priority: 'normal', force }))
         }
 
         await Promise.all(tasks)
@@ -1520,6 +1570,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         if (!force && state.aiStats && state.aiStats.fingerprint === fp) {
           return
         }
+        // Délai anti-spam après échec (429, délai dépassé…) : même garde que côté coach,
+        // sinon chaque visite de l'onglet relançait une analyse HIGH de plusieurs minutes.
+        if (!force && lastStatsFailureAt > 0 && Date.now() - lastStatsFailureAt < STATS_FAILURE_COOLDOWN_MS) {
+          return
+        }
 
         set({ aiStatsLoading: true, aiStatsError: null })
         try {
@@ -1527,9 +1582,20 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             exercises: liveExercises,
             completedSessions: state.completedSessions,
             apiKey,
+            isStale: () =>
+              buildStatsFingerprint(
+                get().getExercisesWithLiveProgress(),
+                get().completedSessions,
+              ) !== fp,
           })
+          lastStatsFailureAt = 0
           set({ aiStats: analysis, aiStatsLoading: false, aiStatsError: null })
         } catch (err) {
+          if (err instanceof GeminiError && err.kind === 'cancelled') {
+            set({ aiStatsLoading: false })
+            return
+          }
+          lastStatsFailureAt = Date.now()
           set({
             aiStatsLoading: false,
             aiStatsError: err instanceof Error ? err.message : 'Analyse IA indisponible.',
