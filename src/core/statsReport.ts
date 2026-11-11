@@ -543,6 +543,34 @@ export function buildStatsReport({
     lines.push('')
   }
 
+  const openQuestions: string[] = []
+  const seenQuestions = new Set<string>()
+  for (const ex of exercises) {
+    for (const entry of ex.entries.slice(0, 6)) {
+      const candidates = [
+        entry.note?.trim() ?? '',
+        ...entry.sets.map((s) => s.note?.trim() ?? ''),
+      ].filter((txt) => txt.includes('?') && txt.length >= 6)
+      for (const q of candidates) {
+        const key = `${ex.id}:${q.toLowerCase()}`
+        if (seenQuestions.has(key)) continue
+        seenQuestions.add(key)
+        openQuestions.push(`- **${ex.name}** : « ${q} »`)
+        if (openQuestions.length >= 8) break
+      }
+      if (openQuestions.length >= 8) break
+    }
+    if (openQuestions.length >= 8) break
+  }
+
+  if (openQuestions.length > 0) {
+    lines.push('## Questions ouvertes dans le carnet')
+    for (const q of openQuestions) {
+      lines.push(q)
+    }
+    lines.push('')
+  }
+
   lines.push('## Comment lire ce bilan')
   lines.push(
     '- Les charges sont celles notées dans le carnet ; « par côté » signifie que le poids indiqué est celui d’un seul côté (haltère ou machine à chargement latéral).',

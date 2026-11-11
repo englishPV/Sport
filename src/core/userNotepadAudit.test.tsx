@@ -208,7 +208,7 @@ describe('Carnet réel collé sur le site (audit & non-régression)', () => {
     expect(report).not.toContain('Stagnation : Leg press')
     expect(report).toContain('- Record : 10 kg × 14')
 
-    // Prompt coach remonte aussi les signaux d'échauffement ("pas trouvé 10")
+    // Prompt coach remonte aussi les signaux d'échauffement ("pas trouvé 10") et le DDP mentionne l'unilatéral (1 par 1)
     const upPrompt = buildCoachPrompt({
       section: 'up',
       exercises: parsed.exercises,
@@ -217,6 +217,8 @@ describe('Carnet réel collé sur le site (audit & non-régression)', () => {
       todayIso: '2026-11-11',
     })
     expect(upPrompt).toContain('échauffement : « pas trouvé 10 »')
+    const curlEx = parsed.exercises.find((e) => e.name.startsWith('Curl incliné'))!
+    expect(computeExerciseDdpPlan(curlEx).tip).toContain('1 par 1')
   })
 
   it('exporte et réimporte les lignes (Objectif) du jour sans inverser la séance recommandée', () => {
@@ -271,6 +273,12 @@ describe('Carnet réel collé sur le site (audit & non-régression)', () => {
 
     // Série 1 de travail : le commentaire de l'échauffement ne bave PAS sur la Série 1 !
     expect((screen.getByPlaceholderText('Commentaire') as HTMLInputElement).value).toBe('')
+
+    // Pastille rapide en 1 tap ("+ 1 main par 1 main")
+    await user.click(screen.getByRole('button', { name: /\+ 1 main par 1 main/i }))
+    expect((screen.getByPlaceholderText('Commentaire') as HTMLInputElement).value).toBe(
+      '1 main par 1 main',
+    )
 
     // Menu 1 / 6 : ajoute une série puis passe la fin de l'exercice
     await user.click(screen.getByRole('button', { name: /1 \/ 6/ }))

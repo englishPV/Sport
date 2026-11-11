@@ -152,6 +152,28 @@ function describeExercise(ex: Exercise, index: number): string {
     .join('\n')
 }
 
+function collectSectionQuestions(sectionExercises: readonly Exercise[]): string[] {
+  const questions: string[] = []
+  const seen = new Set<string>()
+  for (const ex of sectionExercises) {
+    const statusTag = ex.active ? '' : ' (en pause)'
+    for (const entry of ex.entries.slice(0, 6)) {
+      const candidates = [
+        entry.note?.trim() ?? '',
+        ...entry.sets.map((s) => s.note?.trim() ?? ''),
+      ].filter((txt) => txt.includes('?') && txt.length >= 6)
+      for (const q of candidates) {
+        const key = `${ex.id}:${q.toLowerCase()}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        questions.push(`- ${ex.name}${statusTag} : « ${q} »`)
+        if (questions.length >= 6) return questions
+      }
+    }
+  }
+  return questions
+}
+
 export function buildCoachPrompt(params: {
   section: SectionId
   exercises: readonly Exercise[]
@@ -161,7 +183,9 @@ export function buildCoachPrompt(params: {
   todayIso: string
 }): string {
   const { section, exercises, athleteRules, settings, todayIso } = params
-  const active = exercises.filter((e) => e.section === section && e.active)
+  const sectionExercises = exercises.filter((e) => e.section === section)
+  const active = sectionExercises.filter((e) => e.active)
+  const openQuestions = collectSectionQuestions(sectionExercises)
   const title = SECTION_LABELS[section].title
   const profile =
     settings.profileHeightCm > 0 && settings.profileWeightKg > 0
@@ -199,14 +223,18 @@ SORTIE : JSON strict conforme au schéma
 - rest_seconds : repos entre séries de travail.
 - tip : une consigne concrète de moins de 120 caractères (ce qui change aujourd'hui).
 - rationale : une phrase courte qui justifie le choix à partir d'une donnée précise de l'historique (série, commentaire, tendance). Chaque exercice doit avoir un « pourquoi » vérifiable, jamais une généralité.
-- summary_lines : 2 à 4 phrases courtes en français, en tutoyant l'athlète, virgule décimale (« 22,5 kg »), sur les choix principaux.
+- summary_lines : 2 à 4 phrases courtes en français, en tutoyant l'athlète, virgule décimale (« 22,5 kg »), sur les choix principaux et, le cas échéant, en répondant aux questions ouvertes de son carnet.
 - Exactement autant de séries de travail que la base DDP calculée pour chaque exercice.
 
 VOLUME DU JOUR (calculé, ne le dépasse pas)
 ${volume}
 
 CONSIGNES DE L'ATHLÈTE
-${athleteRules.trim() || '(aucune)'}
+${athleteRules.trim() || '(aucune)'}${
+    openQuestions.length > 0
+      ? `\n\nQUESTIONS POSÉES PAR L'ATHLÈTE DANS SON CARNET (réponds-y brièvement dans summary_lines ou rationale)\n${openQuestions.join('\n')}`
+      : ''
+  }
 
 EXERCICES DE LA SÉANCE ${title.toUpperCase()}
 ${active.map(describeExercise).join('\n\n')}`

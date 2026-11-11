@@ -1048,6 +1048,23 @@ export function WorkoutView() {
         key={`${currentEx.id}-${cursor.setIdx}`}
         className="my-auto animate-fade-up py-2"
       >
+        {workoutElapsedSeconds >= 3600 && (
+          <div
+            data-testid="duration-fatigue-banner"
+            className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-1.5 text-[11px] font-medium text-amber-800 dark:text-amber-300"
+          >
+            <span>Séance &gt; 1h — hydrate-toi ou allège la fin si la fatigue monte.</span>
+            {sets.some((s) => s.completedAt === null && !s.skipped) && (
+              <button
+                type="button"
+                onClick={skipRemainingSetsOfCurrentExercise}
+                className="shrink-0 rounded-lg bg-amber-500/20 px-2 py-0.5 font-semibold hover:bg-amber-500/30"
+              >
+                Passer fin exo
+              </button>
+            )}
+          </div>
+        )}
         <div className="text-center">
           <span
             className={`inline-block rounded-full px-3 py-0.5 text-xs font-semibold ${
@@ -1237,6 +1254,37 @@ export function WorkoutView() {
             <Flame className="h-3.5 w-3.5" />
             Échec
           </button>
+        </div>
+
+        {/* Pastilles rapides (unilatéral, micro-pause, réserve) en 1 tap */}
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {(['1 main par 1 main', 'micro-pause', 'facile'] as const).map((tag) => {
+            const noteText = currentSet.note ?? ''
+            const hasTag = noteText.toLowerCase().includes(tag.toLowerCase())
+            return (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => {
+                  const nextNote = hasTag
+                    ? noteText
+                        .replace(new RegExp(`(?:^|\\s*·\\s*|\\s+)${tag}`, 'i'), '')
+                        .trim()
+                    : noteText.trim()
+                      ? `${noteText.trim()} · ${tag}`
+                      : tag
+                  updateDraftSet(currentEx.id, currentSet.id, { note: nextNote })
+                }}
+                className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                  hasTag
+                    ? 'bg-indigo-500/15 text-indigo-700 dark:bg-indigo-500/25 dark:text-indigo-300'
+                    : 'bg-slate-100 text-slate-500 hover:bg-slate-200/80 dark:bg-slate-800/70 dark:text-slate-400 dark:hover:bg-slate-800'
+                }`}
+              >
+                + {tag}
+              </button>
+            )
+          })}
         </div>
       </div>
 

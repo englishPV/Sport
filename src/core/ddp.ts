@@ -261,6 +261,13 @@ export function computeExerciseDdpPlan(exercise: Exercise, variant?: string): Ex
     tip = `Conserve ${formatNumberFr(s1Weight)}kg et vise +1 rep (objectif ${targetRep} reps en S1).`
   }
 
+  const allNotes = [latest.note, ...latest.sets.map((s) => s.note ?? '')].join(' ')
+  if (/micro[\s-]*pause|petite\s*pause|quelques\s*secondes\s*de\s*pause/i.test(allNotes)) {
+    tip += ' Valide les reps d’une traite sans micro-pause.'
+  } else if (/1\s*(?:main|bras)?\s*par\s*1/i.test(allNotes)) {
+    tip += ' Même repère des deux côtés (1 par 1).'
+  }
+
   return {
     exerciseId: exercise.id,
     sets: targetSets,
