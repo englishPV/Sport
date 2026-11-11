@@ -155,6 +155,8 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
                           rest_seconds: 150,
                           tip: 'Contrôle la descente.',
                           sets: [
+                            { weight: 50, reps_min: 10, reps_max: 10, is_warmup: true },
+                            { weight: 80, reps_min: 6, reps_max: 6, is_warmup: true },
                             { weight: 105, reps_min: 8, reps_max: 10, is_warmup: false },
                             { weight: 85, reps_min: 10, reps_max: 12, is_warmup: false },
                             { weight: 85, reps_min: 10, reps_max: 12, is_warmup: false },
@@ -175,8 +177,9 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     // Série 1 modifiée par l'utilisateur reste intacte à 115 kg x 9
     expect(updatedLog.sets[0].weight).toBe(115)
     expect(updatedLog.sets[0].reps).toBe(9)
-    // Série 2 non touchée reçoit bien la cible Gemini (85 kg)
-    expect(updatedLog.sets[1].weight).toBe(85)
+    // Les séries non touchées reçoivent bien les cibles Gemini (105 kg puis 85 kg)
+    expect(updatedLog.sets[2].weight).toBe(105)
+    expect(updatedLog.sets[3].weight).toBe(85)
   })
 
   it("affiche un écran d'exercice épuré (sans Dernière, sans bouton Échauffement/+1 série, placeholder 'Commentaire') et une pause sans -15s", async () => {
@@ -359,7 +362,7 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
       }
       const promptText = parsedBody.contents?.[0]?.parts?.[0]?.text ?? ''
       requestedPrompts.push(promptText)
-      const isUp = promptText.includes('Séance cible à planifier maintenant : Haut du corps (Up)')
+      const isUp = promptText.includes('séance déjà choisie par l\'application : Haut du corps (Up)')
 
       return {
         ok: true,
@@ -422,8 +425,8 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(2)
     })
-    expect(requestedPrompts[0]).toContain('Séance cible à planifier maintenant : Jambes (Legs)')
-    expect(requestedPrompts[1]).toContain('Séance cible à planifier maintenant : Haut du corps (Up)')
+    expect(requestedPrompts[0]).toContain('séance déjà choisie par l\'application : Jambes (Legs)')
+    expect(requestedPrompts[1]).toContain('séance déjà choisie par l\'application : Haut du corps (Up)')
     expect(screen.getByText(/Prochaine Haut déjà générée/i)).toBeInTheDocument()
 
     // Lance et termine la séance Jambes : aucun nouvel appel API car les 2 plans sont déjà prêts !
@@ -450,18 +453,19 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
       'Prochaine séance Haut déjà générée',
     )
 
-    // Enregistre la séance : Haut devient la séance du jour, déjà prête à 0ms sans nouvel appel API
+    // Enregistre la séance : Haut devient la séance du jour, déjà prête sans attente.
+    // Jambes, qui vient d'être faite, est recalculée en arrière-plan avec le nouvel historique.
     await user.click(screen.getByRole('button', { name: 'Enregistrer la séance' }))
     expect(screen.getByRole('heading', { level: 1, name: 'Haut' })).toBeInTheDocument()
     expect(screen.getByText(/Prochaine séance Haut déjà générée/i)).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-
-    // Quand l'utilisateur appuie ensuite sur Haut, Haut est déjà généré : seule la prochaine séance Jambes est pré-générée !
-    await user.click(screen.getByRole('button', { name: 'Haut' }))
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(3)
     })
-    expect(requestedPrompts[2]).toContain('Séance cible à planifier maintenant : Jambes (Legs)')
+    expect(requestedPrompts[2]).toContain('séance déjà choisie par l\'application : Jambes (Legs)')
+
+    // Appuyer ensuite sur Haut ne relance rien : les deux plans sont prêts ou déjà en cours.
+    await user.click(screen.getByRole('button', { name: 'Haut' }))
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('permet de modifier soi-même son fichier .txt directement dans Bloc-notes et applique les changements', async () => {

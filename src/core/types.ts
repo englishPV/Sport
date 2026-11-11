@@ -177,6 +177,11 @@ export interface AiStatsAnalysis {
 export interface AppSettings {
   apiKey: string
   geminiModel: string
+  /** Vrai dès que le modèle a été choisi à la main ; sinon le modèle par défaut s'applique. */
+  geminiModelChosen?: boolean
+  geminiChannel?: 'auto' | 'ai_studio' | 'vertex'
+  /** Adresse de remplacement (proxy). Vide = serveurs Google. */
+  geminiBaseUrl?: string
   theme: 'light' | 'dark'
   soundEnabled: boolean
   vibrationEnabled: boolean

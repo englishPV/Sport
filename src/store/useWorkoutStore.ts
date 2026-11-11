@@ -18,16 +18,19 @@ import {
   getRecommendedSection,
 } from '../core/ddp'
 import {
-  GEMINI_MODEL,
+  DEFAULT_GEMINI_MODEL,
   analyzeStatsWithGemini,
   buildSectionPlanFingerprint,
   buildStatsFingerprint,
+  configureGemini,
   generateGeminiSessionPlan,
   isGeminiPlanFresh,
   parseWorkoutTextWithGemini,
   resetGeminiClientState,
   sanitizeApiKey,
 } from '../core/gemini'
+import { COACH_REQUEST_TAG } from '../core/gemini'
+import { GeminiError, cancelQueuedGeminiRequests } from '../core/geminiClient'
 import { hasUnrecognizedWorkoutText, parseNotepad } from '../core/parser'
 import { computeSetRestDuration, getOptimalExtraRestSeconds } from '../core/restScience'
 import {
@@ -67,6 +70,8 @@ let storeEpoch = 0
 const inFlightCoachBySection: Partial<Record<SectionId, Promise<void>>> = {}
 
 function clearInFlightCoachTracking(): void {
+  // Les plans encore en file portent sur des données dépassées : inutile de les envoyer.
+  cancelQueuedGeminiRequests(COACH_REQUEST_TAG)
   delete inFlightCoachBySection.up
   delete inFlightCoachBySection.legs
 }
@@ -276,7 +281,10 @@ function createInitialData() {
 
   const settings: AppSettings = {
     apiKey: sanitizeApiKey(EXAMPLE_API_KEY),
-    geminiModel: GEMINI_MODEL,
+    geminiModel: DEFAULT_GEMINI_MODEL,
+    geminiModelChosen: false,
+    geminiChannel: 'auto',
+    geminiBaseUrl: '',
     theme: 'light',
     soundEnabled: false,
     vibrationEnabled: false,
@@ -380,6 +388,43 @@ export interface WorkoutStoreState {
   adjustRestTimer: (deltaSeconds: number) => void
   updateSettings: (patch: Partial<AppSettings>) => void
   clearApiKey: () => void
+
+  /** Mode test : copie des vraies données, remise en place telle quelle à la sortie. */
+  simulation: PersistedSlice | null
+  startSimulation: () => void
+  exitSimulation: () => void
+  simulateNextStep: () => void
+  simulateWholeSession: () => void
+}
+
+/** Ce qui est écrit dans le stockage du navigateur. */
+export type PersistedSlice = Pick<
+  WorkoutStoreState,
+  | 'preamble'
+  | 'exercises'
+  | 'completedSessions'
+  | 'aiStats'
+  | 'coachPlans'
+  | 'activeDraft'
+  | 'sessionPhase'
+  | 'cursor'
+  | 'restTimer'
+  | 'settings'
+>
+
+function pickPersisted(state: WorkoutStoreState): PersistedSlice {
+  return {
+    preamble: state.preamble,
+    exercises: state.exercises,
+    completedSessions: state.completedSessions,
+    aiStats: state.aiStats,
+    coachPlans: state.coachPlans,
+    activeDraft: state.activeDraft,
+    sessionPhase: state.sessionPhase,
+    cursor: state.cursor,
+    restTimer: state.restTimer,
+    settings: state.settings,
+  }
 }
 
 export const useWorkoutStore = create<WorkoutStoreState>()(
@@ -393,6 +438,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       aiError: null,
       lastToast: null,
       setLastToast: (msg) => set({ lastToast: msg }),
+      simulation: null,
 
       selectSection: (section) => {
         const state = get()
@@ -929,6 +975,9 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           },
         })
 
+        // La séance suivante est déjà prête ; celle qui vient d'être faite se recalcule en arrière-plan.
+        void get().ensureSessionPlansGenerated(recommended)
+
         return {
           savedExercises,
           validatedSets: validatedSetsCount,
@@ -967,6 +1016,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           aiError: null,
         })
 
+        const tracked: { promise?: Promise<void> } = {}
         const taskPromise = (async () => {
           try {
             const plan = await generateGeminiSessionPlan({
@@ -1011,12 +1061,15 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             })
           } catch (err) {
             if (storeEpoch !== myEpoch) return
+            if (err instanceof GeminiError && err.kind === 'cancelled') return
             set({
               aiError: err instanceof Error ? err.message : 'Erreur Gemini.',
             })
           } finally {
-            delete inFlightCoachBySection[section]
-            if (storeEpoch === myEpoch) {
+            // Une requête d'avant une remise à zéro ne doit pas effacer le suivi de la suivante.
+            if (inFlightCoachBySection[section] === tracked.promise) delete inFlightCoachBySection[section]
+            // Une génération plus récente de la même section garde son indicateur.
+            if (storeEpoch === myEpoch && !inFlightCoachBySection[section]) {
               const current = get()
               const updatedGenerating = {
                 ...current.aiGeneratingSections,
@@ -1030,6 +1083,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           }
         })()
 
+        tracked.promise = taskPromise
         inFlightCoachBySection[section] = taskPromise
         return taskPromise
       },
@@ -1204,6 +1258,8 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         const entriesCount = finalExercises.reduce((acc, ex) => acc + ex.entries.length, 0)
 
         const profile = inferProfileFromPreamble(finalPreamble)
+        // Nouvel historique : les plans demandés sur l'ancien sont abandonnés.
+        clearInFlightCoachTracking()
 
         set({
           ...(profile
@@ -1253,7 +1309,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         const fresh = createInitialData()
         set({
           ...fresh,
-          settings: { ...get().settings, geminiModel: GEMINI_MODEL, soundEnabled: false },
+          settings: { ...get().settings, soundEnabled: false },
           aiLoading: false,
           aiGeneratingSections: { up: false, legs: false },
           aiStatsLoading: false,
@@ -1283,24 +1339,105 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       },
 
       updateSettings: (patch) => {
-        const cleanedPatch =
-          patch.apiKey !== undefined
-            ? { ...patch, apiKey: sanitizeApiKey(patch.apiKey) }
-            : patch
+        const cleanedPatch: Partial<AppSettings> = { ...patch }
+        if (patch.apiKey !== undefined) cleanedPatch.apiKey = sanitizeApiKey(patch.apiKey)
+        if (patch.geminiModel !== undefined) {
+          const model = patch.geminiModel.trim()
+          cleanedPatch.geminiModel = model || DEFAULT_GEMINI_MODEL
+          cleanedPatch.geminiModelChosen = model !== ''
+        }
+        if (patch.geminiBaseUrl !== undefined) cleanedPatch.geminiBaseUrl = patch.geminiBaseUrl.trim()
+        const touchesAi =
+          patch.apiKey !== undefined ||
+          patch.geminiModel !== undefined ||
+          patch.geminiChannel !== undefined ||
+          patch.geminiBaseUrl !== undefined
         set((state) => ({
-          settings: { ...state.settings, ...cleanedPatch, geminiModel: GEMINI_MODEL },
-          ...(patch.apiKey !== undefined
-            ? { aiStatsError: null, aiError: null }
-            : {}),
+          settings: { ...state.settings, ...cleanedPatch },
+          ...(touchesAi ? { aiStatsError: null, aiError: null } : {}),
         }))
       },
 
       clearApiKey: () => {
+        clearInFlightCoachTracking()
         set((state) => ({
           settings: { ...state.settings, apiKey: '' },
           aiError: null,
           aiStatsError: null,
         }))
+      },
+
+      startSimulation: () => {
+        const state = get()
+        if (state.simulation) return
+        // Les réponses IA encore en route appartiennent aux vraies données : on les ignore.
+        storeEpoch += 1
+        clearInFlightCoachTracking()
+
+        const section = getRecommendedSection(state.exercises).recommended
+        // Plans remis à la base calculée : les générations IA sont réellement rejouées.
+        const coachPlans: Record<SectionId, CoachSessionPlan> = {
+          up: buildDdpSessionPlan(state.exercises, 'up'),
+          legs: buildDdpSessionPlan(state.exercises, 'legs'),
+        }
+        set({
+          simulation: pickPersisted(state),
+          coachPlans,
+          aiLoading: false,
+          aiGeneratingSections: { up: false, legs: false },
+          aiError: null,
+          sessionPhase: 'idle',
+          cursor: { exerciseIdx: 0, setIdx: 0 },
+          restTimer: null,
+          undoStack: [],
+          activeDraft: {
+            section,
+            date: todayISODate(),
+            startedAt: null,
+            phaseStartedAt: null,
+            pendingRestSeconds: null,
+            logs: buildDraftLogsForSection(state.exercises, section, coachPlans[section]),
+          },
+        })
+        void get().ensureSessionPlansGenerated(section)
+      },
+
+      exitSimulation: () => {
+        const state = get()
+        if (!state.simulation) return
+        storeEpoch += 1
+        clearInFlightCoachTracking()
+        set({
+          ...state.simulation,
+          // Les réglages modifiés pendant le test (clé, modèle, thème) sont gardés.
+          settings: state.settings,
+          simulation: null,
+          undoStack: [],
+          aiLoading: false,
+          aiGeneratingSections: { up: false, legs: false },
+          aiError: null,
+          lastToast: null,
+        })
+        void get().ensureSessionPlansGenerated(get().activeDraft.section)
+      },
+
+      simulateNextStep: () => {
+        const state = get()
+        if (!state.simulation) return
+        if (state.sessionPhase === 'idle') get().startWorkout()
+        else if (state.sessionPhase === 'working') get().validateCurrentSet()
+        else if (state.sessionPhase === 'resting') get().skipRest()
+      },
+
+      simulateWholeSession: () => {
+        if (!get().simulation) return
+        if (get().sessionPhase === 'idle') get().startWorkout()
+        for (let guard = 0; guard < 500; guard += 1) {
+          const phase = get().sessionPhase
+          if (phase === 'working') get().validateCurrentSet()
+          else if (phase === 'resting') get().skipRest()
+          else break
+        }
       },
     }),
     {
@@ -1312,6 +1449,9 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       merge: (persistedState, currentState) => {
         const persisted = (persistedState ?? {}) as Partial<WorkoutStoreState>
         const rawKey = persisted.settings?.apiKey ?? currentState.settings.apiKey
+        const savedModel = persisted.settings?.geminiModel?.trim() ?? ''
+        // Un modèle jamais choisi à la main (anciennes versions) repasse sur le modèle par défaut.
+        const modelChosen = persisted.settings?.geminiModelChosen === true && savedModel !== ''
         return {
           ...currentState,
           ...persisted,
@@ -1323,23 +1463,30 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             ...currentState.settings,
             ...(persisted.settings ?? {}),
             apiKey: sanitizeApiKey(rawKey),
-            geminiModel: GEMINI_MODEL,
+            geminiModel: modelChosen ? savedModel : DEFAULT_GEMINI_MODEL,
+            geminiModelChosen: modelChosen,
             soundEnabled: false,
           },
         }
       },
-      partialize: (state) => ({
-        preamble: state.preamble,
-        exercises: state.exercises,
-        completedSessions: state.completedSessions,
-        aiStats: state.aiStats,
-        coachPlans: state.coachPlans,
-        activeDraft: state.activeDraft,
-        sessionPhase: state.sessionPhase,
-        cursor: state.cursor,
-        restTimer: state.restTimer,
-        settings: state.settings,
-      }),
+      // En mode test, seule la copie des vraies données est écrite : rien de simulé n'est enregistré,
+      // même si l'onglet est fermé en plein test.
+      partialize: (state): PersistedSlice =>
+        state.simulation ? { ...state.simulation, settings: state.settings } : pickPersisted(state),
     },
   ),
 )
+
+/* Le client Gemini suit les réglages (modèle, canal, adresse). */
+function syncGeminiConfig(settings: AppSettings): void {
+  configureGemini({
+    model: settings.geminiModel,
+    channel: settings.geminiChannel ?? 'auto',
+    baseUrl: settings.geminiBaseUrl ?? '',
+  })
+}
+
+syncGeminiConfig(useWorkoutStore.getState().settings)
+useWorkoutStore.subscribe((state, prev) => {
+  if (state.settings !== prev.settings) syncGeminiConfig(state.settings)
+})

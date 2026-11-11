@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { BarChart3, FileText, Moon, Settings, Sun } from 'lucide-react'
+import { BarChart3, FileText, FlaskConical, Moon, Settings, Sun } from 'lucide-react'
+import { SimulationBanner } from './components/SimulationBanner'
 import { useWorkoutStore } from './store/useWorkoutStore'
 import { NotepadView } from './views/NotepadView'
 import { ProgressView } from './views/ProgressView'
@@ -17,6 +18,8 @@ export default function App() {
   const theme = useWorkoutStore((s) => s.settings.theme)
   const sessionPhase = useWorkoutStore((s) => s.sessionPhase)
   const updateSettings = useWorkoutStore((s) => s.updateSettings)
+  const simulating = useWorkoutStore((s) => s.simulation !== null)
+  const startSimulation = useWorkoutStore((s) => s.startSimulation)
 
   useEffect(() => {
     const root = document.documentElement
@@ -31,38 +34,62 @@ export default function App() {
   // Pendant la séance (Série 1 -> Pause -> Série 2 -> Fini) : 1 seule chose à l'écran !
   if (sessionPhase !== 'idle') {
     return (
-      <main key="session" className="min-h-dvh animate-fade-in">
-        <WorkoutView />
-      </main>
+      <>
+        <SimulationBanner />
+        <main key="session" className="min-h-dvh animate-fade-in">
+          <WorkoutView />
+        </main>
+      </>
     )
   }
 
   if (screen === 'notepad') {
     return (
-      <div key="notepad" className="min-h-dvh animate-fade-up">
-        <NotepadView onBack={() => setScreen('home')} />
-      </div>
+      <>
+        <SimulationBanner />
+        <div key="notepad" className="min-h-dvh animate-fade-up">
+          <NotepadView onBack={() => setScreen('home')} />
+        </div>
+      </>
     )
   }
   if (screen === 'progress') {
     return (
-      <div key="progress" className="min-h-dvh animate-fade-up">
-        <ProgressView onBack={() => setScreen('home')} />
-      </div>
+      <>
+        <SimulationBanner />
+        <div key="progress" className="min-h-dvh animate-fade-up">
+          <ProgressView onBack={() => setScreen('home')} />
+        </div>
+      </>
     )
   }
   if (screen === 'settings') {
     return (
-      <div key="settings" className="min-h-dvh animate-fade-up">
-        <SettingsView onBack={() => setScreen('home')} />
-      </div>
+      <>
+        <SimulationBanner />
+        <div key="settings" className="min-h-dvh animate-fade-up">
+          <SettingsView onBack={() => setScreen('home')} />
+        </div>
+      </>
     )
   }
 
   return (
     <div key="home" className="min-h-dvh animate-fade-in">
+      <SimulationBanner />
       {/* Icônes discrètes en haut à droite uniquement sur l'accueil */}
       <header className="mx-auto flex max-w-md animate-fade-in items-center justify-end gap-1.5 px-5 pt-4">
+        {simulating ? null : (
+          <button
+            type="button"
+            title="Rejouer une séance complète sans rien enregistrer"
+            onClick={startSimulation}
+            className="tap mr-auto flex h-10 items-center gap-1.5 rounded-xl px-3 text-xs font-bold text-slate-500 hover:bg-slate-200/60 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+          >
+            <FlaskConical size={16} aria-hidden="true" />
+            Séance test
+          </button>
+        )}
         <button
           type="button"
           aria-label="Bloc-notes"
