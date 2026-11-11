@@ -4,10 +4,21 @@
  */
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash'
-/** Modèle de secours quand le modèle choisi ne répond pas. */
-export const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash'
-/** Proposés tant que la liste réelle n'a pas été lue avec la clé. */
-export const SUGGESTED_GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro']
+/**
+ * Seuls les modèles 3.8+ sont utilisés et aucun repli automatique n'existe vers un autre
+ * modèle (et surtout pas vers la série 2.x) : le modèle réglé est le seul interrogé.
+ * Proposés tant que la liste réelle n'a pas été lue avec la clé.
+ */
+export const SUGGESTED_GEMINI_MODELS = ['gemini-3.8-flash']
+
+/** Vrai pour `gemini-3.8-flash`, ses variantes (lite, preview…) et les versions ≥ 3.8. */
+export function isSupportedGeminiModel(model: string): boolean {
+  const m = /^gemini-(\d+)\.(\d+)/i.exec(model.trim())
+  if (!m) return false
+  const major = Number(m[1])
+  const minor = Number(m[2])
+  return major > 3 || (major === 3 && minor >= 8)
+}
 
 /**
  * Les modèles Gemini 3+ acceptent `thinkingLevel` : on demande HIGH (réflexion maximale).
@@ -87,7 +98,12 @@ export const CHANNEL_LABEL: Record<ConcreteChannel, string> = {
 
 /** La réflexion HIGH des modèles 3.x prend 2 à 4 min sur une séance complète (mesuré). */
 const GENERATION_TIMEOUT_MS = 300_000
-const TEST_TIMEOUT_MS = 25_000
+/**
+ * Une requête aussi courte que le test de connexion part quand même en réflexion HIGH :
+ * mesuré entre 30 s et 2 min selon la charge de Google. Un délai plus court faisait
+ * échouer `gemini-3.8-flash` à tort et poussait l'app vers un autre modèle.
+ */
+const TEST_TIMEOUT_MS = 180_000
 const LIST_TIMEOUT_MS = 15_000
 const RETRY_DELAYS_MS = [1500, 4000]
 const MAX_RETRY_WAIT_MS = 15_000
@@ -276,7 +292,7 @@ export function classifyHttpError(status: number, payload: unknown, model: strin
   if (status === 404 || /is not found for API version|not supported for generateContent/i.test(blob)) {
     return new GeminiError(
       'model_not_found',
-      `Le modèle « ${model} » n’existe pas ou n’est pas accessible avec cette clé. Choisissez-en un autre dans la liste.`,
+      `Le modèle « ${model} » n’est pas accessible avec cette clé. Vérifiez qu’elle vient d’un projet Google où ${DEFAULT_GEMINI_MODEL} est ouvert.`,
       extra,
     )
   }
@@ -304,7 +320,7 @@ export function classifyHttpError(status: number, payload: unknown, model: strin
   if (status >= 500) {
     return new GeminiError(
       'overloaded',
-      `Le modèle « ${model} » est surchargé côté Google. Réessayez ou choisissez un autre modèle.`,
+      `Le modèle « ${model} » est surchargé côté Google. Réessayez dans un instant.`,
       extra,
     )
   }
@@ -374,7 +390,7 @@ async function fetchWithTimeout<T>(
     if (controller.signal.aborted) {
       throw new GeminiError(
         'timeout',
-        `Pas de réponse de « ${model} » en ${seconds(timeoutMs)} s. Ce modèle est lent ou saturé : choisissez-en un plus rapide.`,
+        `Pas de réponse de « ${model} » en ${seconds(timeoutMs)} s. La réflexion HIGH est lente ou Google est saturé : relancez dans un instant.`,
       )
     }
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -490,14 +506,6 @@ const CHANNEL_SPECIFIC: ReadonlySet<GeminiErrorKind> = new Set([
   'model_not_found',
   'network',
 ])
-const MODEL_SPECIFIC: ReadonlySet<GeminiErrorKind> = new Set([
-  'model_not_found',
-  'overloaded',
-  'timeout',
-  'quota',
-  'rate_limited',
-  'empty',
-])
 
 async function callModel(params: {
   cleanKey: string
@@ -517,6 +525,8 @@ async function callModel(params: {
         return result
       } catch (raw) {
         const err = raw instanceof GeminiError ? raw : new GeminiError('unknown', String(raw))
+        // Aucun autre modèle ne prend le relais : seules les surcharges passagères sont retentées,
+        // sur le même modèle (un délai dépassé doublerait l'attente pour rien).
         const retryable = err.kind === 'rate_limited' || err.kind === 'overloaded'
         const wait = err.retryAfterMs ?? RETRY_DELAYS_MS[attempt]
         if (retryable && attempt < RETRY_DELAYS_MS.length && wait <= MAX_RETRY_WAIT_MS) {
@@ -541,30 +551,25 @@ export async function generateJson(params: {
   priority?: 'high' | 'normal'
   /** Permet d'annuler en bloc les requêtes d'une même famille encore en file. */
   tag?: string
-  /** Bascule sur le modèle de secours si le modèle choisi ne répond pas. */
-  allowModelFallback?: boolean
   model?: string
 }): Promise<GeminiJsonResult> {
   const cleanKey = sanitizeApiKey(params.apiKey)
   if (!cleanKey) throw new GeminiError('missing_key', 'Clé API manquante.')
   const model = params.model ?? config.model
-  const timeoutMs = params.timeoutMs ?? GENERATION_TIMEOUT_MS
-  const allowFallback = params.allowModelFallback ?? true
 
-  return enqueue(async () => {
-    const shared = { cleanKey, prompt: params.prompt, responseSchema: params.responseSchema, timeoutMs }
-    try {
-      return await callModel({ ...shared, model })
-    } catch (raw) {
-      const err = raw as GeminiError
-      if (!allowFallback || model === FALLBACK_GEMINI_MODEL || !MODEL_SPECIFIC.has(err.kind)) throw err
-      try {
-        return await callModel({ ...shared, model: FALLBACK_GEMINI_MODEL })
-      } catch {
-        throw err
-      }
-    }
-  }, params.priority ?? 'normal', params.tag)
+  return enqueue(
+    // Un seul modèle est interrogé, celui qui est réglé : aucun basculement silencieux.
+    () =>
+      callModel({
+        cleanKey,
+        model,
+        prompt: params.prompt,
+        responseSchema: params.responseSchema,
+        timeoutMs: params.timeoutMs ?? GENERATION_TIMEOUT_MS,
+      }),
+    params.priority ?? 'normal',
+    params.tag,
+  )
 }
 
 /** Compatibilité : renvoie uniquement le texte JSON. */
@@ -610,8 +615,6 @@ export interface ConnectionTestResult {
   ok: boolean
   message: string
   kind?: GeminiErrorKind
-  /** Modèle qui fonctionne avec cette clé quand celui choisi ne répond pas. */
-  suggestedModel?: string
   models?: string[]
   latencyMs?: number
 }
@@ -626,7 +629,8 @@ export async function testGeminiConnection(apiKey: string): Promise<ConnectionTe
   const base = { apiKey, prompt: TEST_PROMPT, responseSchema: TEST_SCHEMA, priority: 'high' as const }
 
   try {
-    const res = await generateJson({ ...base, timeoutMs: TEST_TIMEOUT_MS, allowModelFallback: false })
+    // Le modèle réglé est le seul interrogé : si le test échoue, la génération échouera aussi.
+    const res = await generateJson({ ...base, model, timeoutMs: TEST_TIMEOUT_MS })
     return {
       ok: true,
       models,
@@ -635,20 +639,14 @@ export async function testGeminiConnection(apiKey: string): Promise<ConnectionTe
     }
   } catch (raw) {
     const err = raw instanceof GeminiError ? raw : new GeminiError('unknown', 'Échec du test.')
-    if (MODEL_SPECIFIC.has(err.kind) && model !== FALLBACK_GEMINI_MODEL) {
-      try {
-        await generateJson({ ...base, model: FALLBACK_GEMINI_MODEL, timeoutMs: TEST_TIMEOUT_MS, allowModelFallback: false })
-        return {
-          ok: false,
-          kind: err.kind,
-          models,
-          suggestedModel: FALLBACK_GEMINI_MODEL,
-          message: `${err.message} La clé fonctionne avec ${FALLBACK_GEMINI_MODEL}.`,
-        }
-      } catch {
-        /* le diagnostic du modèle choisi reste le plus utile */
-      }
+    const slow = err.kind === 'timeout' || err.kind === 'overloaded' || err.kind === 'empty'
+    return {
+      ok: false,
+      kind: err.kind,
+      models,
+      message: slow
+        ? `${err.message} La clé est valide : ${modelLabel(model)} demande simplement plus de temps (réflexion HIGH). Relancez le test.`
+        : err.message,
     }
-    return { ok: false, kind: err.kind, models, message: err.message }
   }
 }

@@ -3,6 +3,7 @@ import { ArrowLeft, Eye, EyeOff, FlaskConical, Loader2, Moon, Sun, Trash2, Wifi 
 import {
   DEFAULT_GEMINI_MODEL,
   SUGGESTED_GEMINI_MODELS,
+  isSupportedGeminiModel,
   modelLabel,
   detectApiProvider,
   sanitizeApiKey,
@@ -43,9 +44,13 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
 
   const cleanedKey = sanitizeApiKey(settings.apiKey)
   const detectedProvider = cleanedKey ? detectApiProvider(cleanedKey) : null
-  const currentModel = settings.geminiModel || DEFAULT_GEMINI_MODEL
+  // Seuls les modèles 3.8+ sont proposés, même si la clé en ouvre d'autres.
+  const currentModel = isSupportedGeminiModel(settings.geminiModel)
+    ? settings.geminiModel
+    : DEFAULT_GEMINI_MODEL
+  const supportedModels = availableModels.filter(isSupportedGeminiModel)
   const modelOptions = Array.from(
-    new Set([currentModel, ...(availableModels.length > 0 ? availableModels : SUGGESTED_GEMINI_MODELS)]),
+    new Set([currentModel, ...(supportedModels.length > 0 ? supportedModels : SUGGESTED_GEMINI_MODELS)]),
   )
 
   const handleTest = async () => {
@@ -155,9 +160,9 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
             ))}
           </select>
           <p className="mt-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            {availableModels.length > 0
-              ? 'Liste des modèles ouverts à votre clé.'
-              : 'Testez la clé pour voir tous les modèles ouverts à votre clé.'}
+            {supportedModels.length > 0
+              ? 'Modèles 3.8 ou plus récents ouverts à votre clé.'
+              : 'Version 3.8 ou plus récente uniquement. Testez la clé pour voir ce qu’elle ouvre.'}
           </p>
         </div>
 
@@ -244,17 +249,10 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
             >
               {status.message}
             </p>
-            {status.suggestedModel ? (
-              <button
-                type="button"
-                onClick={() => {
-                  updateSettings({ geminiModel: status.suggestedModel })
-                  setStatus(null)
-                }}
-                className={`${SECONDARY_BUTTON} w-full`}
-              >
-                Utiliser {status.suggestedModel}
-              </button>
+            {!status.ok && status.models && !status.models.some(isSupportedGeminiModel) ? (
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                Cette clé n’ouvre aucun modèle 3.8. Vérifiez le projet Google associé à la clé.
+              </p>
             ) : null}
           </div>
         ) : null}

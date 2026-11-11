@@ -727,6 +727,8 @@ export function WorkoutView() {
   }
 
   const currentLog = activeDraft.logs[currentEx.id]
+  // Le « pourquoi » du coach (Gemini ou DDP) accompagne la série, sans jamais bloquer l'écran.
+  const currentTip = coachPlans[section]?.exercises[currentEx.id]?.tip?.trim() ?? ''
   const sets = currentLog?.sets ?? []
   const currentSet = sets[cursor.setIdx] ?? sets[0]
   if (!currentSet) return null
@@ -846,6 +848,14 @@ export function WorkoutView() {
           <h2 className="mt-2.5 text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
             {currentEx.name}
           </h2>
+          {currentTip ? (
+            <p
+              data-testid="coach-tip"
+              className="mx-auto mt-2 max-w-xs text-xs font-medium leading-snug text-slate-500 dark:text-slate-400"
+            >
+              {currentTip}
+            </p>
+          ) : null}
         </div>
 
         {/* Poids (kg) et Répétitions (reps) — retour visuel par la couleur */}
