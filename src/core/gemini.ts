@@ -137,6 +137,7 @@ const COACH_PLAN_SCHEMA: Record<string, unknown> = {
           exercise_id: { type: 'STRING' },
           rest_seconds: { type: 'INTEGER' },
           tip: { type: 'STRING' },
+          rationale: { type: 'STRING' },
           sets: {
             type: 'ARRAY',
             items: {
@@ -253,7 +254,10 @@ export async function generateGeminiSessionPlan(params: {
         30,
         Math.min(360, Math.round(Number(rec.rest_seconds) || ex.defaultRestSeconds)),
       )
-      const tip = typeof rec.tip === 'string' ? rec.tip.trim().slice(0, 140) : ''
+      const tipRaw = typeof rec.tip === 'string' ? rec.tip.trim() : ''
+      const rationale = typeof rec.rationale === 'string' ? rec.rationale.trim() : ''
+      // Le « pourquoi » du coach accompagne toujours la consigne, sans dépasser l'affichage mobile.
+      const tip = (tipRaw || rationale).slice(0, 140)
 
       byId[ex.id] = guardExercisePlan(
         ex,

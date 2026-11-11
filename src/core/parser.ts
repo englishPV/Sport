@@ -514,6 +514,25 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
   const blocks = withoutParens.split('|')
   const sets: WorkoutSet[] = []
 
+  /** Un bloc = un groupe de séries de même charge : son commentaire décrit ce groupe. */
+  const pushSetGroup = (
+    weight: number,
+    repsList: { reps: number; failure?: boolean }[],
+    note: string,
+    warmup: boolean,
+  ) => {
+    const clean = note.replace(/\s*·\s*$/, '').trim()
+    repsList.forEach((r, idx) => {
+      sets.push({
+        weight,
+        reps: r.reps,
+        ...(warmup ? { isWarmup: true } : {}),
+        ...(r.failure ? { failure: true } : {}),
+        ...(idx === 0 && clean ? { note: clean } : {}),
+      })
+    })
+  }
+
   for (const rawBlock of blocks) {
     let block = rawBlock.trim()
     if (!block) continue
@@ -533,15 +552,7 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
     )
     if (pdcMatch) {
       const { repsList, trailingNote } = parseRepsTokens(pdcMatch[1])
-      if (trailingNote) collectedNotes.push(trailingNote)
-      for (const r of repsList) {
-        sets.push({
-          weight: 0,
-          reps: r.reps,
-          ...(explicitWarmup ? { isWarmup: true } : {}),
-          ...(r.failure ? { failure: true } : {}),
-        })
-      }
+      pushSetGroup(0, repsList, trailingNote, explicitWarmup)
       continue
     }
 
@@ -556,18 +567,9 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
     const stdMatch = /^(.*?)\b(\d+(?:[.,]\d+)?)\s*(?:kg)?\s*[xX×*]\s*(.+)$/.exec(block)
     if (stdMatch) {
       const prefix = stdMatch[1].replace(/^[:",\s]+|[:",\s]+$/g, '').trim()
-      if (prefix) collectedNotes.push(prefix)
       const weight = Number(stdMatch[2].replace(',', '.'))
       const { repsList, trailingNote } = parseRepsTokens(stdMatch[3])
-      if (trailingNote) collectedNotes.push(trailingNote)
-      for (const r of repsList) {
-        sets.push({
-          weight,
-          reps: r.reps,
-          ...(explicitWarmup ? { isWarmup: true } : {}),
-          ...(r.failure ? { failure: true } : {}),
-        })
-      }
+      pushSetGroup(weight, repsList, [prefix, trailingNote].filter(Boolean).join(' · '), explicitWarmup)
       continue
     }
 
@@ -575,18 +577,9 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
     const noXMatch = /^(.*?)\b(\d+(?:[.,]\d+)?)\s*kg\s+(\d.*)$/i.exec(block)
     if (noXMatch) {
       const prefix = noXMatch[1].replace(/^[:",\s]+|[:",\s]+$/g, '').trim()
-      if (prefix) collectedNotes.push(prefix)
       const weight = Number(noXMatch[2].replace(',', '.'))
       const { repsList, trailingNote } = parseRepsTokens(noXMatch[3])
-      if (trailingNote) collectedNotes.push(trailingNote)
-      for (const r of repsList) {
-        sets.push({
-          weight,
-          reps: r.reps,
-          ...(explicitWarmup ? { isWarmup: true } : {}),
-          ...(r.failure ? { failure: true } : {}),
-        })
-      }
+      pushSetGroup(weight, repsList, [prefix, trailingNote].filter(Boolean).join(' · '), explicitWarmup)
       continue
     }
 
@@ -633,6 +626,48 @@ export interface ParseNotepadOptions {
   preserveCustomPreamble?: boolean
   /** Date du jour (YYYY-MM-DD) : les lignes « (Objectif) » antérieures deviennent des séances faites */
   todayIso?: string
+}
+
+/**
+ * Une série n'a pas de note à elle : la note d'une entrée est donc rattachée à la série
+ * de travail qu'elle commente. Une note collée juste après une série (même à la suite de la
+ * précédente) concerne celle-là ; une note en fin de ligne, après un `(repos : …)`, parle de
+ * toute la séquence et revient à la première série de travail. Seules les annotations de
+ * contexte (durée de repos, séance, échauffement, Objectif, variante de machine) restent au niveau
+ * de l'entrée : c'est ce qui permet au coach de lire « 2min30 » sur la série concernée.
+ */
+const CONTEXT_ONLY_NOTE =
+  /^(?:repos\b|r[eé]cup|s[eé]ance\b|exo\b|exercice\b|[eé]chauffements?\b|objectif\b|aujourd|duree|dur[ée]e\b)/i
+
+function attributeNotesToSets(entry: ExerciseEntry): ExerciseEntry {
+  const note = entry.note.replace(/\s*·\s*/g, ' | ').trim()
+  if (!note || entry.sets.length === 0) return entry
+  const fragments = note
+    .split(/\s*[|·]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const comments = fragments.filter((part) => !CONTEXT_ONLY_NOTE.test(part))
+  if (comments.length === 0) return entry
+
+  const workIdx = entry.sets
+    .map((set, idx) => (set.isWarmup ? -1 : idx))
+    .filter((idx) => idx >= 0)
+  if (workIdx.length === 0) return entry
+
+  const cleaned = [...entry.sets]
+  // Les notes déjà posées sur une série (commentaire écrit à côté d'elle) restent à leur place :
+  // seules les séries encore muettes reçoivent les commentaires restants, dans l'ordre.
+  const silent = workIdx.filter((idx) => !(cleaned[idx].note ?? '').trim())
+  comments.forEach((comment, i) => {
+    const target =
+      silent[i] ??
+      // Plus de commentaires que de séries : les suivants précisent la dernière série.
+      (silent[silent.length - 1] ?? workIdx[workIdx.length - 1])
+    const set = cleaned[target]
+    const previous = (set.note ?? '').trim()
+    cleaned[target] = { ...set, note: previous ? `${previous} · ${comment}` : comment }
+  })
+  return { ...entry, sets: cleaned }
 }
 
 export function parseNotepad(
@@ -767,7 +802,9 @@ export function parseNotepad(
     }
   }
 
-  const settled = options.todayIso ? settleObjectives(exercises, options.todayIso) : exercises
+  const withNotes = exercises.map((ex) => ({ ...ex, entries: ex.entries.map(attributeNotesToSets) }))
+
+  const settled = options.todayIso ? settleObjectives(withNotes, options.todayIso) : withNotes
 
   const rawPreamble = preambleLines.join('\n').trim()
   const preamble = options.preserveCustomPreamble
@@ -882,10 +919,13 @@ export function formatSetsForNotepad(sets: readonly WorkoutSet[], unit: Unit): s
 
   return groups
     .map((group) => {
-      const weightLabel =
+      const base =
         unit === 'bodyweight' && group.weight === 0
           ? 'Poids de corps'
           : `${formatNumberFr(group.weight)}kg`
+      // Sans le marqueur, une série d'échauffement relue depuis le carnet (export puis réimport)
+      // repasserait pour une série de travail et fausserait la DDP.
+      const weightLabel = group.isWarmup ? `${base} (échauffement)` : base
       const repsLabel = group.reps
         .map((r) => {
           const numStr = Number.isInteger(r.val)
@@ -990,7 +1030,8 @@ export function formatPlanLineForNotepad(params: {
     .map((g) => {
       const w =
         unit === 'bodyweight' && g.weight === 0 ? 'Poids de corps' : `${formatNumberFr(g.weight)}kg`
-      return `${w} x ${g.repsLabels.join(', ')}`
+      // Une échauffement reste marqué, sinon la ligne objectif se relit comme une série de travail.
+      return `${w}${g.isWarmup ? ' (échauffement)' : ''} x ${g.repsLabels.join(', ')}`
     })
     .join(' | ')
 

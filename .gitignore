@@ -4,3 +4,6 @@ coverage
 .DS_Store
 *.local
 *.tsbuildinfo
+# Carnet réel (données personnelles, jamais versionné)
+previous repetitions.txt
+userNotepad.txt

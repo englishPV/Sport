@@ -7,7 +7,6 @@
  * et toute charge hors limites revient à la base DDP.
  */
 import { computeExerciseDdpPlan } from './ddp'
-import { formatEntryForNotepad } from './parser'
 import { buildEnrichedChronology } from './statsEngine'
 import {
   SECTION_LABELS,
@@ -21,9 +20,45 @@ import {
 } from './types'
 
 export const COACH_HISTORY_DEPTH = 3
+/** Séances résumées (charges + reps) au-delà du détail : les cycles de 12-15 reps se voient sur 6 séances. */
+export const COACH_HISTORY_SUMMARY_DEPTH = 6
 
 function realEntries(ex: Exercise): ExerciseEntry[] {
   return ex.entries.filter((e) => !e.skipOnly && e.sets.length > 0)
+}
+
+/** « 10 kg × 12 | 22 kg × 12 | 20 kg × 12, 9 » — la forme que l'athlète lit dans son carnet. */
+function setsOutline(entry: ExerciseEntry, unit: Exercise['unit']): string {
+  const groups: { weight: number; reps: number[] }[] = []
+  for (const set of entry.sets) {
+    const prev = groups[groups.length - 1]
+    if (prev && prev.weight === set.weight) prev.reps.push(set.reps)
+    else groups.push({ weight: set.weight, reps: [set.reps] })
+  }
+  return groups
+    .map((group) => `${kg(group.weight, unit)} × ${group.reps.join(', ')}`)
+    .join(' | ')
+}
+
+/**
+ * Ce que le carnet ne dit pas toujours mais qui change la décision : la marge à l'échec
+ * (« j'aurais pu faire 13 »), l'échec, le repos réel, les reps perdues entre séries.
+ */
+function readSetSignals(entry: ExerciseEntry): string {
+  const work = entry.sets.filter((set) => !set.isWarmup)
+  if (work.length === 0) return ''
+  const signals: string[] = []
+  const drop = work[0].reps - work[work.length - 1].reps
+  if (drop >= 3) signals.push(`décrochage de ${drop} reps entre la 1re et la dernière série`)
+  if (work.some((set) => set.failure)) signals.push('échec noté')
+  const notes = work
+    .map((set, idx) => ({ idx: idx + 1, note: (set.note ?? '').trim() }))
+    .filter((item) => item.note)
+  if (notes.length > 0) {
+    signals.push(notes.map((item) => `S${item.idx} : « ${item.note} »`).join(' ; '))
+  }
+  if (entry.restSeconds) signals.push(`repos réel ${entry.restSeconds} s`)
+  return signals.length > 0 ? `  signaux : ${signals.join(' · ')}` : ''
 }
 
 function kg(value: number, unit: Exercise['unit']): string {
@@ -75,9 +110,13 @@ function describeExercise(ex: Exercise, index: number): string {
 
   const sessions = entries.slice(0, COACH_HISTORY_DEPTH).map((entry) => {
     const variant = variantById.get(entry.id)
-    const line = formatEntryForNotepad(entry, ex.unit).replace(/^[•\-*]\s*/, '')
-    return `  - ${line}${variant && variant !== 'Standard' ? `  [variante : ${variant}]` : ''}`
+    const variantTag = variant && variant !== 'Standard' ? `  [variante : ${variant}]` : ''
+    const signals = readSetSignals(entry)
+    return `  - ${setsOutline(entry, ex.unit)}${variantTag}${signals ? `\n${signals}` : ''}`
   })
+  const olderSessions = entries
+    .slice(COACH_HISTORY_DEPTH, COACH_HISTORY_SUMMARY_DEPTH)
+    .map((entry) => `  - ${entry.date ? formatIsoToFr(entry.date) : 'sans date'} : ${setsOutline(entry, ex.unit)}`)
   const contextNotes = ex.entries
     .filter((e) => e.skipOnly && e.note.trim())
     .slice(0, 2)
@@ -92,6 +131,9 @@ function describeExercise(ex: Exercise, index: number): string {
     sessions.length > 0
       ? `dernières séances, la plus récente en premier :\n${sessions.join('\n')}`
       : 'aucune séance enregistrée : propose une charge de départ prudente dans la fourchette',
+    olderSessions.length > 0
+      ? `séances plus anciennes (tendance de fond) :\n${olderSessions.join('\n')}`
+      : '',
     ...contextNotes,
     `base DDP calculée : ${describeBaseline(computeExerciseDdpPlan(ex), ex.unit)}`,
   ]
@@ -114,6 +156,7 @@ export function buildCoachPrompt(params: {
     settings.profileHeightCm > 0 && settings.profileWeightKg > 0
       ? `Athlète : ${settings.profileHeightCm} cm, ${formatNumberFr(settings.profileWeightKg)} kg, pratiquant naturel, objectif hypertrophie.`
       : 'Athlète : pratiquant naturel, objectif hypertrophie.'
+  const volume = describeVolume(active)
 
   return `Tu es un entraîneur de musculation expérimenté. Tu fixes les charges et répétitions d'UNE séance déjà choisie par l'application : ${title}.
 Ne choisis pas la séance, ne parle d'aucun exercice absent de la liste, ne réécris pas le carnet.
@@ -130,26 +173,52 @@ MÉTHODE, par ordre de priorité
    - échec noté, ou chute de 3 reps ou plus entre deux séries à la même charge : garde la charge, cible réaliste, allonge le repos de 30 s (maximum 240 s en polyarticulaire, 150 s en isolation).
    - PLATEAU signalé : ne redonne pas la même cible une fois de plus. Soit baisse d'un palier et repars du haut de la fourchette, soit garde la charge et demande +1 rep sur une seule série. Explique-le dans tip.
    - effort visé : 1 à 2 reps de réserve sur les séries de travail ; l'échec n'est utile que sur la dernière série d'un exercice d'isolation.
+   - signaux par série (« S2 : j’aurais pu faire 13 ») : une marge avouée à la dernière série autorise le palier même sans 12 reps sur la Série 1 ; une note de douleur, d'essoufflement ou de sommeil ne fait jamais monter la charge.
+   - un exercice ancien jamais daté (ligne sans date) n'est pas une séance de référence : reste sur la base DDP, sans le traiter comme un progrès.
    - jamais plus d'un palier de hausse sur une série, jamais charge ET reps en hausse sur la même série.
    - variantes de machine : ne compare jamais deux variantes entre elles ; repars de la dernière séance de la variante la plus récente.
 4. Structure inchangée : même nombre de séries que d'habitude, mêmes échauffements (is_warmup true), charges réellement disponibles (charges déjà utilisées, ou un palier au-dessus). N'invente ni série ni échauffement.
 
 LIMITES
-Tu ne connais que les 3 dernières séances de chaque exercice. N'invente aucun chiffre. Si une donnée manque ou se contredit, reprends la base DDP calculée telle quelle.
+Tu ne connais que les 6 dernières séances de chaque exercice (les 3 plus récentes en détail). N'invente aucun chiffre. Si une donnée manque ou se contredit, reprends la base DDP calculée telle quelle.
 
 SORTIE : JSON strict conforme au schéma
 - exercises : un objet par exercice de la liste, avec son exercise_id exact, dans le même ordre.
 - sets : dans l'ordre d'exécution ; weight en kg (0 au poids du corps) ; reps_min et reps_max = fourchette de la série ; target_reps = objectif précis du jour.
 - rest_seconds : repos entre séries de travail.
-- tip : une consigne concrète de moins de 120 caractères (ce qui change aujourd'hui et pourquoi).
+- tip : une consigne concrète de moins de 120 caractères (ce qui change aujourd'hui).
+- rationale : une phrase courte qui justifie le choix à partir d'une donnée précise de l'historique (série, commentaire, tendance). Chaque exercice doit avoir un « pourquoi » vérifiable, jamais une généralité.
 - summary_lines : 2 à 4 phrases courtes en français, en tutoyant l'athlète, virgule décimale (« 22,5 kg »), sur les choix principaux.
 - Exactement autant de séries de travail que la base DDP calculée pour chaque exercice.
+
+VOLUME DU JOUR (calculé, ne le dépasse pas)
+${volume}
 
 CONSIGNES DE L'ATHLÈTE
 ${athleteRules.trim() || '(aucune)'}
 
 EXERCICES DE LA SÉANCE ${title.toUpperCase()}
 ${active.map(describeExercise).join('\n\n')}`
+}
+
+const POLY_VOLUME_TARGET = 40
+const ISOLATION_VOLUME_TARGET = 24
+
+/** Séries de travail prévues et volume : le repère qui évite de surcharger une séance. */
+function describeVolume(active: readonly Exercise[]): string {
+  let hardSets = 0
+  let tonnage = 0
+  for (const ex of active) {
+    for (const set of computeExerciseDdpPlan(ex).sets) {
+      if (set.isWarmup) continue
+      hardSets += 1
+      tonnage += set.weight * set.suggestedReps
+    }
+  }
+  const target = active.some((ex) => ex.category === 'poly') ? POLY_VOLUME_TARGET : ISOLATION_VOLUME_TARGET
+  // Un exercice à 10-15 séries hebdomadaires suffit : ~20 séries dures par séance sur deux séances.
+  const budget = Math.round(target / 2 + (active.length >= 6 ? 6 : 0))
+  return `${hardSets} séries de travail et ${Math.round(tonnage)} kg de tonnage sur cette séance (repère : ${budget} séries maximum). Ne propose pas de série supplémentaire, même si l'athlète semble pouvoir en faire plus : la progression vient de la charge et des reps, pas du volume.`
 }
 
 export interface GuardResult {

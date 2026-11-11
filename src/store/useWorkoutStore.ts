@@ -444,7 +444,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       selectSection: (section) => {
         const state = get()
         if (state.activeDraft.section !== section) {
-          const plan = state.coachPlans[section] ?? buildDdpSessionPlan(state.exercises, section)
+          // Un plan IA périmé (historique modifié) repart de la DDP : la séance reste alignée
+          // sur les dernières séries, sans attendre la nouvelle réponse de Gemini.
+          const plan = isGeminiPlanFresh(state.coachPlans[section], state.exercises, section, state.preamble)
+            ? state.coachPlans[section]
+            : buildDdpSessionPlan(state.exercises, section)
           set({
             aiError: null,
             sessionPhase: 'idle',
@@ -825,8 +829,9 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       discardActiveWorkout: () => {
         const state = get()
         const section = state.activeDraft.section
-        const plan =
-          state.coachPlans[section] ?? buildDdpSessionPlan(state.exercises, section)
+        const plan = isGeminiPlanFresh(state.coachPlans[section], state.exercises, section, state.preamble)
+          ? state.coachPlans[section]
+          : buildDdpSessionPlan(state.exercises, section)
         set({
           sessionPhase: 'idle',
           cursor: { exerciseIdx: 0, setIdx: 0 },

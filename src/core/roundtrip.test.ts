@@ -4,6 +4,7 @@ import { DEFAULT_NOTEPAD_PREAMBLE, DEFAULT_NOTEPAD_TEXT } from './defaultNotepad
 import {
   exportNotepad,
   formatEntryForNotepad,
+  formatPlanLineForNotepad,
   hasUnrecognizedWorkoutText,
   inferProfileFromPreamble,
   parseNotepad,
@@ -54,7 +55,8 @@ describe('export fidèle du bloc-notes', () => {
       ],
     }
     expect(formatEntryForNotepad(entry, 'kg')).toBe(
-      '• 10/11/2026 : 10kg x 12 | 22kg x 12 (facile vraiment), 9 (échec) (épaule) (repos : 2min30)',
+      // L'échauffement reste marqué : au réimport il ne doit pas passer pour une série de travail.
+      '• 10/11/2026 : 10kg (échauffement) x 12 | 22kg x 12 (facile vraiment), 9 (échec) (épaule) (repos : 2min30)',
     )
   })
 })
@@ -127,5 +129,50 @@ describe('profil lu dans le préambule', () => {
     })
     expect(inferProfileFromPreamble('1 m 70, 65,5 kg')).toEqual({ heightCm: 170, weightKg: 65.5 })
     expect(inferProfileFromPreamble('augmente de +1kg à +2,5kg et vise 8-10 reps')).toBeNull()
+  })
+})
+
+describe('commentaires et échauffements du carnet', () => {
+  it('rattache un commentaire de série à la série qu’il suit', () => {
+    const parsed = parseNotepad(
+      [
+        'Up Développé incliné haltères :',
+        '• 09/11/2026 : 10kg x 12 | 22kg x 12 (j’aurais pu faire 13) | 20kg x 12, 8 (repos : 2min30) (épaule gauche)',
+      ].join('\n'),
+    )
+    const sets = parsed.exercises[0].entries[0].sets
+    expect(sets[0].isWarmup).toBe(true)
+    expect(sets[0].note).toBeUndefined()
+    // La note collée après la série parle de cette série, pas de l'exercice entier.
+    expect(sets[1].note).toBe('j’aurais pu faire 13')
+    // Une note ajoutée en fin de ligne revient à la première série de travail.
+    expect(sets[2].note).toBe('épaule gauche')
+    // Le repos reste une donnée de l'entrée : c'est ce qui l'exporte correctement.
+    expect(parsed.exercises[0].entries[0].restSeconds).toBe(150)
+  })
+
+  it('marque les échauffements à l’export pour qu’ils ne deviennent pas des séries de travail', () => {
+    const parsed = parseNotepad(
+      ['Up Presse :', '• 04/11/2026 : 50kg (échauffement) x 10 | 100kg x 9, 9'].join('\n'),
+    )
+    const exported = exportNotepad({ preamble: parsed.preamble, exercises: parsed.exercises })
+    expect(exported).toContain('50kg (échauffement) x 10')
+    const again = parseNotepad(exported)
+    const sets = again.exercises[0].entries[0].sets
+    expect(sets[0].isWarmup).toBe(true)
+    expect(sets.filter((s) => !s.isWarmup)).toHaveLength(2)
+  })
+
+  it('écrit l’échauffement dans la ligne (Objectif)', () => {
+    const line = formatPlanLineForNotepad({
+      dateIso: '2026-11-11',
+      unit: 'kg',
+      restSeconds: 150,
+      sets: [
+        { weight: 50, repsMin: 10, repsMax: 10, isWarmup: true },
+        { weight: 100, repsMin: 8, repsMax: 10 },
+      ],
+    })
+    expect(line).toBe('• 11/11/2026 (Objectif) : 50kg (échauffement) x 10 | 100kg x 8-10 (repos : 2min30)')
   })
 })
