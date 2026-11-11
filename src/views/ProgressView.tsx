@@ -214,8 +214,25 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
     }
   }, [completedSessions])
 
+  const kpis = useMemo(() => {
+    const insightOf = (ex: Exercise) =>
+      freshAiStats?.exercises[ex.id] ?? localInsightsById[ex.id] ?? computeSmartExerciseInsight(ex)
+    const progressing = activeAllExercises.filter((ex) => insightOf(ex).status === 'progressing').length
+    const records = activeAllExercises.filter((ex) => getLatestRecordInfo(ex)?.isRecord).length
+    return [
+      { label: 'Séances', value: String(totalUniqueDates), hint: 'dans le carnet' },
+      {
+        label: 'Temps moyen',
+        value: sessionTimings ? formatDurationShort(sessionTimings.average) : '—',
+        hint: sessionTimings ? `sur ${sessionTimings.count} chronométrée${sessionTimings.count > 1 ? 's' : ''}` : 'aucune chronométrée',
+      },
+      { label: 'En progression', value: `${progressing}/${activeAllExercises.length}`, hint: 'exercices actifs' },
+      { label: 'Records', value: String(records), hint: 'à la dernière séance' },
+    ]
+  }, [activeAllExercises, freshAiStats, localInsightsById, totalUniqueDates, sessionTimings])
+
   return (
-    <div className="mx-auto max-w-xl space-y-4 px-4 py-6">
+    <div className="mx-auto max-w-xl space-y-4 px-4 py-6 lg:max-w-3xl">
       <div className="flex items-center justify-between gap-2">
         {onBack ? (
           <button
@@ -268,6 +285,22 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
         </p>
       ) : null}
 
+      <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {kpis.map((kpi, idx) => (
+          <div
+            key={kpi.label}
+            style={{ animationDelay: `${idx * 40}ms` }}
+            className="animate-fade-up rounded-2xl border border-slate-200/80 bg-white px-3.5 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+          >
+            <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              {kpi.label}
+            </dt>
+            <dd className="mt-1 text-xl font-extrabold tabular-nums text-slate-900 dark:text-white">{kpi.value}</dd>
+            <dd className="text-[11px] text-slate-500 dark:text-slate-400">{kpi.hint}</dd>
+          </div>
+        ))}
+      </dl>
+
       {/* Synthèse globale concise (locale immédiate + enrichissement Gemini 3.8 Flash High) */}
       <section className="rounded-3xl border border-slate-200/80 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="flex items-center justify-between gap-2">
@@ -275,12 +308,6 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
             <h2 className="text-sm font-bold text-slate-900 dark:text-white">
               Synthèse
             </h2>
-            <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">
-              ·
-            </span>
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              {totalUniqueDates} séances dans le carnet
-            </span>
             {aiStatsLoading ? (
               <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 dark:text-indigo-300">
                 <span className="h-1.5 w-1.5 animate-ping rounded-full bg-indigo-500" />
@@ -288,7 +315,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
               </span>
             ) : freshAiStats ? (
               <span className="animate-pop-in rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">
-                IA 3.8 High
+                Analyse IA
               </span>
             ) : null}
           </div>
@@ -314,8 +341,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
 
         {sessionTimings ? (
           <p className="mt-1 animate-fade-in text-[11px] font-medium text-slate-400 dark:text-slate-500">
-            Temps à la salle : {formatDurationShort(sessionTimings.average)} en moyenne sur{' '}
-            {sessionTimings.count} séance{sessionTimings.count > 1 ? 's' : ''} · effort{' '}
+            Cumul chronométré : effort{' '}
             {formatDurationShort(sessionTimings.work)} · repos{' '}
             {formatDurationShort(sessionTimings.rest)}
           </p>

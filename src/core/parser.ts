@@ -450,7 +450,10 @@ function markWarmupSets(sets: WorkoutSet[]): WorkoutSet[] {
 }
 
 export function parseEntryLine(rawLine: string): ExerciseEntry {
-  let working = rawLine.replace(/^[•\-*]\s*/, '').trim()
+  let working = rawLine
+    .replace(/^[•\-*]\s*/, '')
+    .replace(/^\[[ xX]?\]\s*/, '')
+    .trim()
   const collectedNotes: string[] = []
   let wasObjective = false
   let date: string | null = null
@@ -628,6 +631,8 @@ export function parseEntryLine(rawLine: string): ExerciseEntry {
 export interface ParseNotepadOptions {
   /** Si true, respecte un préambule volontairement vidé par l'utilisateur au lieu de réinjecter le défaut */
   preserveCustomPreamble?: boolean
+  /** Date du jour (YYYY-MM-DD) : les lignes « (Objectif) » antérieures deviennent des séances faites */
+  todayIso?: string
 }
 
 export function parseNotepad(
@@ -647,6 +652,7 @@ export function parseNotepad(
   const flushBullets = () => {
     for (const item of pendingBulletLines) {
       const entry = parseEntryLine(item.text)
+      entry.raw = item.text
       item.exercise.entries.push(entry)
     }
     pendingBulletLines = []
@@ -719,6 +725,9 @@ export function parseNotepad(
         }
       }
 
+      // Case à cocher vide laissée par l'appli de notes (`- [ ]`, `- [x]`) : aucune donnée
+      if (/^[•\-*]?\s*\[[ xX]?\]$/.test(lineContent)) continue
+
       if (/^[•\-*]/.test(lineContent)) {
         pendingBulletLines.push({ exercise: currentExercise, text: lineContent })
       } else if (pendingBulletLines.length > 0) {
@@ -758,12 +767,61 @@ export function parseNotepad(
     }
   }
 
+  const settled = options.todayIso ? settleObjectives(exercises, options.todayIso) : exercises
+
   const rawPreamble = preambleLines.join('\n').trim()
   const preamble = options.preserveCustomPreamble
     ? rawPreamble
     : rawPreamble || DEFAULT_NOTEPAD_PREAMBLE
 
-  return { preamble, exercises }
+  return { preamble, exercises: settled }
+}
+
+const OBJECTIVE_MARKER_RE = /\s*\(\s*objectif\s*\)/i
+
+/**
+ * Range les lignes « (Objectif) » :
+ * - date passée -> séance réellement faite (le marqueur disparaît, la ligne reste intacte) ;
+ * - même date qu'une séance déjà enregistrée -> simple plan devenu inutile, retiré ;
+ * - aujourd'hui ou plus tard -> reste un objectif.
+ */
+export function settleObjectives(exercises: readonly Exercise[], todayIso: string): Exercise[] {
+  return exercises.map((ex) => {
+    if (!ex.entries.some((e) => e.wasObjective)) return ex
+    const performedDates = new Set(
+      ex.entries
+        .filter((e) => !e.wasObjective && !e.skipOnly && e.sets.length > 0 && e.date)
+        .map((e) => e.date),
+    )
+    const entries: ExerciseEntry[] = []
+    for (const entry of ex.entries) {
+      if (!entry.wasObjective || !entry.date) {
+        entries.push(entry)
+      } else if (performedDates.has(entry.date)) {
+        continue
+      } else if (entry.date < todayIso) {
+        const done: ExerciseEntry = { ...entry }
+        delete done.wasObjective
+        if (done.raw) done.raw = done.raw.replace(OBJECTIVE_MARKER_RE, '')
+        entries.push(done)
+      } else {
+        entries.push(entry)
+      }
+    }
+    return { ...ex, entries }
+  })
+}
+
+/** Lit « Je mesure 1m84 pour 72kg » dans le préambule pour renseigner le profil. */
+export function inferProfileFromPreamble(
+  preamble: string,
+): { heightCm: number; weightKg: number } | null {
+  const match = /(\d)\s*m\s*(\d{2})\b[^\n]*?(\d{2,3}(?:[.,]\d)?)\s*kg/i.exec(preamble)
+  if (!match) return null
+  const heightCm = Number(match[1]) * 100 + Number(match[2])
+  const weightKg = Number(match[3].replace(',', '.'))
+  if (heightCm < 120 || heightCm > 230 || weightKg < 30 || weightKg > 250) return null
+  return { heightCm, weightKg }
 }
 
 /**
@@ -803,18 +861,21 @@ export function formatSetsForNotepad(sets: readonly WorkoutSet[], unit: Unit): s
   if (sets.length === 0) return ''
 
   // Regroupe les séries consécutives de même poids (et même statut warmup)
-  const groups: { weight: number; isWarmup: boolean; reps: { val: number; failure?: boolean }[] }[] =
-    []
+  const groups: {
+    weight: number
+    isWarmup: boolean
+    reps: { val: number; failure?: boolean; note?: string }[]
+  }[] = []
 
   for (const set of sets) {
     const prev = groups[groups.length - 1]
     if (prev && prev.weight === set.weight && prev.isWarmup === Boolean(set.isWarmup)) {
-      prev.reps.push({ val: set.reps, failure: set.failure })
+      prev.reps.push({ val: set.reps, failure: set.failure, note: set.note })
     } else {
       groups.push({
         weight: set.weight,
         isWarmup: Boolean(set.isWarmup),
-        reps: [{ val: set.reps, failure: set.failure }],
+        reps: [{ val: set.reps, failure: set.failure, note: set.note }],
       })
     }
   }
@@ -830,7 +891,8 @@ export function formatSetsForNotepad(sets: readonly WorkoutSet[], unit: Unit): s
           const numStr = Number.isInteger(r.val)
             ? String(r.val)
             : String(Math.round(r.val * 100) / 100)
-          return `${numStr}${r.failure ? ' (échec)' : ''}`
+          const note = (r.note ?? '').replace(/[()|\s]+/g, ' ').trim()
+          return `${numStr}${r.failure ? ' (échec)' : ''}${note ? ` (${note})` : ''}`
         })
         .join(', ')
       return `${weightLabel} x ${repsLabel}`
@@ -878,6 +940,10 @@ export function formatSetsForDisplay(sets: readonly WorkoutSet[], unit: Unit): s
 }
 
 export function formatEntryForNotepad(entry: ExerciseEntry, unit: Unit): string {
+  if (entry.raw) {
+    // Ligne venue du bloc-notes : réécrite telle quelle, seule la puce est normalisée.
+    return `• ${entry.raw.replace(/^[•\-*]\s*/, '').trim()}`
+  }
   if (entry.skipOnly) {
     return `• ${entry.note}`
   }

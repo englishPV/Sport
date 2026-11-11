@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_NOTEPAD_TEXT } from './defaultNotepad'
+import { LEGACY_NOTEPAD_TEXT as DEFAULT_NOTEPAD_TEXT } from './__fixtures__/legacyNotepad'
 
 const TEST_VERTEX_KEY = 'AQ.TestVertexExpressDummyKey0000'
 import {
   exportNotepad,
   hasUnrecognizedWorkoutText,
   parseEntryLine,
+  settleObjectives,
   parseNotepad,
 } from './parser'
 import { buildDdpSessionPlan, computeExerciseDdpPlan, getRecommendedSection } from './ddp'
@@ -15,14 +16,11 @@ import {
   buildEndpointUrl,
   detectApiProvider,
   extractAthleteRulesFromPreamble,
-  GEMINI_MODEL,
-  GEMINI_THINKING_LEVEL,
+  DEFAULT_GEMINI_MODEL,
   generateGeminiSessionPlan,
   isGeminiPlanFresh,
   parseWorkoutTextWithGemini,
   resetGeminiClientState,
-  sanitizeApiKey,
-  testGeminiConnection,
 } from './gemini'
 import {
   computeSetRestDuration,
@@ -166,7 +164,7 @@ describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
     const plan = buildDdpSessionPlan(parsed.exercises, 'legs')
     const exported = exportNotepad({
       preamble: parsed.preamble,
-      exercises: parsed.exercises,
+      exercises: settleObjectives(parsed.exercises, '2026-10-23'),
       plan,
       planDateIso: '2026-10-23',
       includeObjectives: true,
@@ -175,28 +173,24 @@ describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
     expect(exported).toContain('Soulevé de Terre Roumain :\n• 23/10/2026 (Objectif) : 24kg x 8-10')
     // Les anciens (Objectif) sur les séances déjà réalisées ont été nettoyés
     expect(exported).not.toContain('22/10/2026 (Objectif)')
-    expect(exported).toContain('• 22/10/2026 : 10kg x 12 | 22kg x 10 | 20kg x 12, 8 (échec)')
+    // ... et la ligne est réécrite telle que saisie, au caractère près
+    expect(exported).toContain('• 22/10/2026 : 10kg x 12 | 22kg x 10 | 20kg x 12, 8(échec) (repos : 2min30)')
   })
 })
 
-describe('Client Gemini 3.8 Flash High & détection clé AQ. Vertex AI Express vs AIza', () => {
-  it('utilise strictement gemini-3.8-flash en thinking HIGH', () => {
-    expect(GEMINI_MODEL).toBe('gemini-3.8-flash')
-    expect(GEMINI_THINKING_LEVEL).toBe('HIGH')
-    expect(detectApiProvider(TEST_VERTEX_KEY).kind).toBe('vertex_express')
-    expect(buildEndpointUrl(TEST_VERTEX_KEY)).toBe(
-      'https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:generateContent',
-    )
-  })
-
-  it('détecte une clé AI Studio classique AIza sur gemini-3.8-flash', () => {
-    expect(detectApiProvider('AIzaSyExampleKey123').kind).toBe('ai_studio')
-    expect(buildEndpointUrl('AIzaSyExampleKey123')).toBe(
+describe('Client Gemini', () => {
+  it('vise AI Studio avec gemini-3.8-flash par défaut, Vertex en secours', () => {
+    expect(DEFAULT_GEMINI_MODEL).toBe('gemini-3.8-flash')
+    expect(buildEndpointUrl('ai_studio')).toBe(
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
     )
+    expect(buildEndpointUrl('vertex', 'gemini-2.5-pro')).toBe(
+      'https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent',
+    )
+    expect(detectApiProvider(TEST_VERTEX_KEY).kind).toBe('vertex_express')
   })
 
-  it('parse une réponse structurée Gemini 3.8 Flash High et complète avec le fallback DDP si besoin', async () => {
+  it('parse une réponse structurée Gemini et complète avec le fallback DDP si besoin', async () => {
     const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -247,62 +241,15 @@ describe('Client Gemini 3.8 Flash High & détection clé AQ. Vertex AI Express v
     expect(plan.exercises['ex-souleve-de-terre-roumain'].sets[0].weight).toBe(24)
     expect(plan.exercises['ex-leg-press']).toBeDefined()
 
-    // Vérifie que la requête envoie bien thinkingLevel: "HIGH" sur gemini-3.8-flash et les commentaires
+    // Vérifie que la requête envoie bien le bon modèle, en réflexion HIGH
     const [calledUrl, calledInit] = mockFetch.mock.calls[0] as [string, RequestInit]
     expect(calledUrl).toContain('gemini-3.8-flash:generateContent')
     const sentBody = JSON.parse(calledInit.body as string)
     expect(sentBody.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH' })
-    expect(sentBody.contents[0].parts[0].text).toContain('user_comment')
+    expect(sentBody.contents[0].parts[0].text).toContain('exercise_id')
   })
 
-  it('bascule automatiquement sur thinkingBudget: 16384 sur gemini-3.8-flash si un endpoint rejette thinkingLevel', async () => {
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 400,
-        json: async () => ({
-          error: { message: 'Invalid value at generation_config.thinking_config.thinking_level' },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          candidates: [
-            {
-              content: {
-                parts: [
-                  {
-                    text: JSON.stringify({
-                      headline: 'OK avec thinkingBudget high.',
-                      bullet_points: [],
-                      exercises: [],
-                    }),
-                  },
-                ],
-              },
-            },
-          ],
-        }),
-      })
-    vi.stubGlobal('fetch', mockFetch)
-
-    const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
-    const stats = await analyzeStatsWithGemini({
-      exercises: parsed.exercises,
-      apiKey: TEST_VERTEX_KEY,
-    })
-
-    expect(stats.headline).toBe('OK avec thinkingBudget high.')
-    expect(mockFetch).toHaveBeenCalledTimes(2)
-    const [secondUrl, secondInit] = mockFetch.mock.calls[1] as [string, RequestInit]
-    expect(secondUrl).toContain('gemini-3.8-flash:generateContent')
-    const secondBody = JSON.parse(secondInit.body as string)
-    expect(secondBody.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 16384 })
-  })
-
-  it('détecte un texte libre non reconnu et extrait les exercices/séries via Gemini 3.8 Flash High', async () => {
+  it('détecte un texte libre non reconnu et extrait les exercices/séries via Gemini', async () => {
     const standardParsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
     expect(hasUnrecognizedWorkoutText(DEFAULT_NOTEPAD_TEXT, standardParsed)).toBe(false)
 
@@ -406,7 +353,7 @@ describe('Temps de repos scientifiques hypertrophie (restScience)', () => {
     expect(entry.note).toBe('super séance')
   })
 
-  it('analyse les statistiques via Gemini 3.8 Flash High sans pourcentages absurdes', async () => {
+  it('analyse les statistiques via Gemini sans pourcentages absurdes', async () => {
     const parsed = parseNotepad(DEFAULT_NOTEPAD_TEXT)
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -580,85 +527,6 @@ describe('Temps de repos scientifiques hypertrophie (restScience)', () => {
     expect(exported2).toBe(exported1)
   })
 
-  it('nettoie les clés API fraîchement copiées et bascule automatiquement en ?key=, cross-provider ou retry 429', async () => {
-    expect(
-      sanitizeApiKey('  GEMINI_API_KEY="AIzaSyBrandNewKey123\u200B\n"  '),
-    ).toBe('AIzaSyBrandNewKey123')
-    expect(sanitizeApiKey('Bearer   AQ.FreshVertexKey999\u00A0')).toBe(
-      'AQ.FreshVertexKey999',
-    )
-
-    // Cas 1 : échec CORS sur l'en-tête x-goog-api-key -> bascule transparente en ?key=
-    const corsFallbackFetch = vi
-      .fn()
-      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          candidates: [{ content: { parts: [{ text: '{"status":"ok"}' }] } }],
-        }),
-      })
-    vi.stubGlobal('fetch', corsFallbackFetch)
-
-    const res1 = await testGeminiConnection('  "AIzaSyCorsNewKey111" ')
-    expect(res1.ok).toBe(true)
-    expect(res1.message).toContain('gemini-3.8-flash')
-    expect(corsFallbackFetch).toHaveBeenCalledTimes(2)
-    expect(String(corsFallbackFetch.mock.calls[1][0])).toContain(
-      'generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=AIzaSyCorsNewKey111',
-    )
-
-    // Cas 2 : clé AIza créée dans Google Cloud Vertex (403 sur AI Studio) + 429 transitoire -> bascule Vertex + retry
-    resetGeminiClientState()
-    const crossProviderFetch = vi
-      .fn()
-      // v1beta header -> 403
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 403,
-        json: async () => ({
-          error: { message: 'Generative Language API has not been used in project' },
-        }),
-      })
-      // v1beta query -> 403
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 403,
-        json: async () => ({
-          error: { message: 'Generative Language API has not been used in project' },
-        }),
-      })
-      // v1alpha -> 404 (skip direct)
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 404,
-        json: async () => ({ error: { message: 'Not found' } }),
-      })
-      // Vertex v1beta1 -> 429 transitoire (nouvelle clé) puis 200 OK !
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 429,
-        json: async () => ({
-          error: { status: 'RESOURCE_EXHAUSTED', message: 'Rate limit spike' },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          candidates: [{ content: { parts: [{ text: '{"status":"ok"}' }] } }],
-        }),
-      })
-    vi.stubGlobal('fetch', crossProviderFetch)
-
-    const res2 = await testGeminiConnection('AIzaSyGcpVertexBoundKey222')
-    expect(res2.ok).toBe(true)
-    expect(String(crossProviderFetch.mock.calls[4][0])).toContain(
-      'aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.8-flash:generateContent',
-    )
-  })
-
   it('permet à l’utilisateur de modifier librement son .txt (nouvel exo vide, commentaires avec kg, préambule perso)', () => {
     const customTxt = [
       'Objectif personnel : focus contrôle excentrique 3s.',
@@ -710,10 +578,10 @@ describe('Temps de repos scientifiques hypertrophie (restScience)', () => {
       preamble: parsed.preamble,
       settings: { profileHeightCm: 184, profileWeightKg: 72 },
     })
-    expect(prompt).toContain('ddp_mathematical_baseline')
-    expect(prompt).toContain('equipment_variant')
+    expect(prompt).toContain('base DDP calculée')
+    expect(prompt).toContain('tendance (calculée)')
     expect(prompt).toContain('target_reps')
-    expect(prompt).toContain('user_comment')
+    expect(prompt).toContain('exercise_id')
     expect(prompt).not.toContain('UNIQUE BLOC DE CODE MARKDOWN')
 
     const mockFetch = vi.fn().mockResolvedValue({

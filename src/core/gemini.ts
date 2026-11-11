@@ -1,12 +1,11 @@
 import { computeExerciseDdpPlan } from './ddp'
 import { DEFAULT_NOTEPAD_PREAMBLE } from './defaultNotepad'
-import { formatSetsForNotepad, inferExerciseMeta } from './parser'
+import { inferExerciseMeta } from './parser'
 import { buildEnrichedChronology } from './statsEngine'
 import {
   createId,
   formatIsoToFr,
   normalizeName,
-  SECTION_LABELS,
   todayISODate,
   type AiExerciseStatInsight,
   type AiStatsAnalysis,
@@ -21,611 +20,11 @@ import {
   type TargetSet,
   type WorkoutSet,
 } from './types'
-
-/** Modèle strict demandé : Gemini 3.8 Flash avec raisonnement HIGH uniquement. */
-export const GEMINI_MODEL = 'gemini-3.8-flash' as const
-export const GEMINI_THINKING_LEVEL = 'HIGH' as const
-
-export type ApiProviderKind = 'vertex_express' | 'ai_studio'
-
-type AuthTransportMode = 'header' | 'query'
-type ThinkingMode = 'level' | 'budget' | 'none'
-
-interface WorkingRoute {
-  url: string
-  authMode: AuthTransportMode
-  thinkingMode: ThinkingMode
-}
-
-const workingRouteByKey = new Map<string, WorkingRoute>()
-
-/**
- * Nettoie une clé API collée depuis Google AI Studio, Google Cloud ou un presse-papiers mobile :
- * retire les préfixes éventuels (`GEMINI_API_KEY=...`, `Bearer ...`), guillemets, retours à la ligne
- * et caractères invisibles Unicode qui feraient échouer `fetch` dans le navigateur.
- */
-export function sanitizeApiKey(rawKey: string): string {
-  if (!rawKey) return ''
-  let cleaned = rawKey
-    .replace(/[\u200B-\u200D\uFEFF\u2060\u00A0]/g, '')
-    .trim()
-
-  cleaned = cleaned.replace(
-    /^(?:export\s+)?(?:VITE_GEMINI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|API_KEY|key)\s*[:=]\s*/i,
-    '',
-  )
-  cleaned = cleaned.replace(/^Bearer\s+/i, '').trim()
-  cleaned = cleaned.replace(/^["'`«“”]+|["'`»“”]+$/g, '').trim()
-  cleaned = Array.from(cleaned.replace(/\s+/g, ''))
-    .filter((ch) => {
-      const code = ch.charCodeAt(0)
-      return code > 31 && (code < 127 || code > 159)
-    })
-    .join('')
-
-  return cleaned
-}
-
-export function detectApiProvider(apiKey: string): {
-  kind: ApiProviderKind
-  label: string
-} {
-  const cleaned = sanitizeApiKey(apiKey)
-  if (cleaned.startsWith('AQ.')) {
-    return {
-      kind: 'vertex_express',
-      label: 'Vertex AI Express',
-    }
-  }
-  return {
-    kind: 'ai_studio',
-    label: 'Google AI Studio',
-  }
-}
-
-export function buildEndpointUrl(
-  apiKey: string,
-  vertexVersion: 'v1beta1' | 'v1' = 'v1beta1',
-): string {
-  const { kind } = detectApiProvider(apiKey)
-  if (kind === 'vertex_express') {
-    return `https://aiplatform.googleapis.com/${vertexVersion}/publishers/google/models/${GEMINI_MODEL}:generateContent`
-  }
-  return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`
-}
-
-function buildCandidateEndpoints(cleanKey: string): string[] {
-  const aiStudioBeta = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`
-  const aiStudioAlpha = `https://generativelanguage.googleapis.com/v1alpha/models/${GEMINI_MODEL}:generateContent`
-  const vertexBeta = `https://aiplatform.googleapis.com/v1beta1/publishers/google/models/${GEMINI_MODEL}:generateContent`
-  const vertexV1 = `https://aiplatform.googleapis.com/v1/publishers/google/models/${GEMINI_MODEL}:generateContent`
-
-  if (detectApiProvider(cleanKey).kind === 'vertex_express') {
-    return [vertexBeta, vertexV1, aiStudioBeta, aiStudioAlpha]
-  }
-  return [aiStudioBeta, aiStudioAlpha, vertexBeta, vertexV1]
-}
-
-/* -------------------------------------------------------------------------- */
-/* File d'attente séquentielle pour éviter les erreurs 429 sur clés récentes  */
-/* -------------------------------------------------------------------------- */
-
-interface QueuedTask<T> {
-  priority: 'high' | 'normal'
-  epoch: number
-  run: () => Promise<T>
-  resolve: (value: T) => void
-  reject: (reason: unknown) => void
-}
-
-let queueEpoch = 0
-let queueRunning = false
-const pendingQueue: QueuedTask<unknown>[] = []
-
-export function resetGeminiClientState(): void {
-  queueEpoch += 1
-  pendingQueue.length = 0
-  queueRunning = false
-  workingRouteByKey.clear()
-}
-
-function drainQueue(): void {
-  if (queueRunning) return
-  const next = pendingQueue.shift()
-  if (!next) return
-
-  queueRunning = true
-  const startedEpoch = queueEpoch
-
-  void next
-    .run()
-    .then(
-      (val) => next.resolve(val),
-      (err) => next.reject(err),
-    )
-    .finally(() => {
-      if (queueEpoch === startedEpoch) {
-        queueRunning = false
-        drainQueue()
-      }
-    })
-}
-
-function enqueueGeminiRequest<T>(
-  run: () => Promise<T>,
-  priority: 'high' | 'normal' = 'normal',
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const task: QueuedTask<unknown> = {
-      priority,
-      epoch: queueEpoch,
-      run: run as () => Promise<unknown>,
-      resolve: resolve as (value: unknown) => void,
-      reject,
-    }
-    if (priority === 'high') {
-      const firstNormalIdx = pendingQueue.findIndex((t) => t.priority !== 'high')
-      if (firstNormalIdx === -1) {
-        pendingQueue.push(task)
-      } else {
-        pendingQueue.splice(firstNormalIdx, 0, task)
-      }
-    } else {
-      pendingQueue.push(task)
-    }
-    drainQueue()
-  })
-}
-
-/* -------------------------------------------------------------------------- */
-/* Construction & exécution résiliente des requêtes Gemini 3.8 Flash High     */
-/* -------------------------------------------------------------------------- */
-
-function buildGenerationConfig(
-  responseSchema: Record<string, unknown>,
-  thinkingMode: ThinkingMode = 'level',
-): Record<string, unknown> {
-  return {
-    responseMimeType: 'application/json',
-    responseSchema,
-    ...(thinkingMode === 'level'
-      ? { thinkingConfig: { thinkingLevel: GEMINI_THINKING_LEVEL } }
-      : thinkingMode === 'budget'
-        ? { thinkingConfig: { thinkingBudget: 16384 } }
-        : {}),
-  }
-}
-
-interface RawGeminiPart {
-  text?: string
-  thought?: boolean
-}
-
-interface RawGeminiErrorDetail {
-  retryDelay?: string
-  reason?: string
-}
-
-interface RawGeminiResponse {
-  candidates?: {
-    finishReason?: string
-    content?: { parts?: RawGeminiPart[] }
-  }[]
-  promptFeedback?: { blockReason?: string }
-  error?: {
-    message?: string
-    status?: string
-    code?: number
-    details?: RawGeminiErrorDetail[]
-  }
-}
-
-function stripFences(raw: string): string {
-  const trimmed = raw.trim()
-  const match = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed)
-  const unfenced = match ? match[1].trim() : trimmed
-  if (unfenced.startsWith('{') && unfenced.endsWith('}')) {
-    return unfenced
-  }
-  const firstBrace = unfenced.indexOf('{')
-  const lastBrace = unfenced.lastIndexOf('}')
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return unfenced.slice(firstBrace, lastBrace + 1)
-  }
-  return unfenced
-}
-
-function extractResponseText(payload: RawGeminiResponse): string {
-  if (payload.promptFeedback?.blockReason) {
-    throw new Error(`Requête bloquée (${payload.promptFeedback.blockReason}).`)
-  }
-  const parts = payload.candidates?.[0]?.content?.parts
-  if (!Array.isArray(parts) || parts.length === 0) {
-    throw new Error('Réponse vide.')
-  }
-  const nonThought = parts
-    .filter((p) => p.thought !== true && typeof p.text === 'string')
-    .map((p) => p.text as string)
-    .join('')
-    .trim()
-
-  if (!nonThought) {
-    throw new Error('Réponse vide.')
-  }
-  return stripFences(nonThought)
-}
-
-interface ParsedHttpError {
-  status: number
-  message: string
-  reason: string
-  retryAfterMs: number | null
-}
-
-async function readErrorDetails(response: Response): Promise<ParsedHttpError> {
-  let message = ''
-  let reason = ''
-  let retryAfterMs: number | null = null
-
-  const retryHeader = response.headers?.get?.('retry-after')
-  if (retryHeader) {
-    const secs = Number(retryHeader)
-    if (Number.isFinite(secs) && secs > 0) {
-      retryAfterMs = Math.min(8_000, Math.round(secs * 1000))
-    }
-  }
-
-  try {
-    const errBody = (await response.json()) as RawGeminiResponse
-    message = errBody.error?.message ?? ''
-    if (Array.isArray(errBody.error?.details)) {
-      for (const detail of errBody.error.details) {
-        if (!reason && typeof detail.reason === 'string') {
-          reason = detail.reason
-        }
-        if (retryAfterMs === null && typeof detail.retryDelay === 'string') {
-          const m = /^(\d+(?:\.\d+)?)s$/i.exec(detail.retryDelay.trim())
-          if (m) {
-            retryAfterMs = Math.min(8_000, Math.round(Number(m[1]) * 1000))
-          }
-        }
-      }
-    }
-  } catch {
-    // Corps non JSON
-  }
-
-  return {
-    status: response.status,
-    message,
-    reason,
-    retryAfterMs,
-  }
-}
-
-function isThinkingOrConfigError(err: ParsedHttpError): boolean {
-  if (err.status !== 400) return false
-  if (/api[_\s-]?key|key not valid|unauthenticated|credential|permission/i.test(err.message)) {
-    return false
-  }
-  if (/API_KEY/i.test(err.reason)) {
-    return false
-  }
-  return /thinking|generation_config|generationconfig|unknown name|invalid value/i.test(
-    err.message,
-  )
-}
-
-function isKeyOrEndpointMismatch(err: ParsedHttpError): boolean {
-  if (err.status === 404 || err.status === 401 || err.status === 403) {
-    // Une restriction de domaine HTTP Referrer échouera sur tous les endpoints Google
-    if (/HTTP_REFERRER_BLOCKED|referer/i.test(`${err.reason} ${err.message}`)) {
-      return false
-    }
-    return true
-  }
-  if (err.status === 400) {
-    return (
-      /API_KEY_INVALID|API_KEY_NOT_FOUND|API_KEY_SERVICE_BLOCKED/i.test(err.reason) ||
-      /api key not valid|pass a valid api key|key is invalid|not found|unsupported/i.test(
-        err.message,
-      )
-    )
-  }
-  return false
-}
-
-function formatFriendlyApiError(err: ParsedHttpError): string {
-  const combined = `${err.reason} ${err.message}`
-  if (/HTTP_REFERRER_BLOCKED|referer/i.test(combined)) {
-    return 'Clé API restreinte par site web (retire la restriction HTTP Referrer dans Google AI Studio / Cloud).'
-  }
-  if (err.status === 429 || /RESOURCE_EXHAUSTED|quota/i.test(combined)) {
-    return err.message
-      ? `Limite de requêtes atteinte sur la clé API (${err.message})`
-      : 'Limite temporaire de requêtes atteinte (patiente quelques secondes puis réessaie).'
-  }
-  if (/API_KEY_INVALID|api key not valid|pass a valid api key/i.test(combined)) {
-    return 'Clé API non reconnue par Google (vérifie que la clé complète est bien copiée sans caractère manquant).'
-  }
-  const detail = err.message ? ` (${err.message})` : ''
-  return `Erreur HTTP ${err.status}${detail}`
-}
-
-function isTestEnv(): boolean {
-  const meta = import.meta as { env?: Record<string, string | boolean | undefined> }
-  return meta.env?.MODE === 'test' || Boolean(meta.env?.VITEST)
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function executeGenerateContentHttp(params: {
-  cleanKey: string
-  prompt: string
-  responseSchema: Record<string, unknown>
-  timeoutMs: number
-}): Promise<string> {
-  const { cleanKey, prompt, responseSchema, timeoutMs } = params
-
-  const sendOnce = async (
-    baseUrl: string,
-    authMode: AuthTransportMode,
-    thinkingMode: ThinkingMode,
-  ): Promise<{ response: Response; clearTimer: () => void } | { aborted: boolean; networkError: unknown }>  => {
-    const controller = new AbortController()
-    let didTimeout = false
-    const timer = setTimeout(() => {
-      didTimeout = true
-      controller.abort()
-    }, timeoutMs)
-
-    const targetUrl =
-      authMode === 'query'
-        ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}key=${encodeURIComponent(cleanKey)}`
-        : baseUrl
-
-    const headers: Record<string, string> =
-      authMode === 'query'
-        ? {
-            'Content-Type': 'application/json',
-          }
-        : {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': cleanKey,
-          }
-
-    try {
-      const response = await fetch(targetUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: buildGenerationConfig(responseSchema, thinkingMode),
-        }),
-        signal: controller.signal,
-      })
-      return { response, clearTimer: () => clearTimeout(timer) }
-    } catch (networkError) {
-      clearTimeout(timer)
-      return { aborted: didTimeout || controller.signal.aborted, networkError }
-    }
-  }
-
-  // Ordonne les routes candidates : route déjà validée en tête si disponible
-  const cachedRoute = workingRouteByKey.get(cleanKey)
-  const baseEndpoints = buildCandidateEndpoints(cleanKey)
-  const endpoints = cachedRoute
-    ? [cachedRoute.url, ...baseEndpoints.filter((u) => u !== cachedRoute.url)]
-    : baseEndpoints
-
-  let primaryParsedError: ParsedHttpError | null = null
-  let lastParsedError: ParsedHttpError | null = null
-  let sawNetworkError = false
-
-  for (let epIdx = 0; epIdx < endpoints.length; epIdx += 1) {
-    const endpoint = endpoints[epIdx]
-    const initialAuthModes: AuthTransportMode[] =
-      cachedRoute && cachedRoute.url === endpoint
-        ? [cachedRoute.authMode, ...(cachedRoute.authMode === 'header' ? (['query'] as const) : (['header'] as const))]
-        : ['header', 'query']
-
-    let moveToNextEndpoint = false
-
-    for (let authIdx = 0; authIdx < initialAuthModes.length; authIdx += 1) {
-      const authMode = initialAuthModes[authIdx]
-      let thinkingMode: ThinkingMode =
-        cachedRoute && cachedRoute.url === endpoint ? cachedRoute.thinkingMode : 'level'
-
-      let rateRetry = 0
-      const maxRateRetries = 2
-
-      while (true) {
-        const outcome = await sendOnce(endpoint, authMode, thinkingMode)
-
-        if ('networkError' in outcome) {
-          if (cachedRoute && cachedRoute.url === endpoint && cachedRoute.authMode === authMode) {
-            workingRouteByKey.delete(cleanKey)
-          }
-          sawNetworkError = true
-          if (outcome.aborted) {
-            moveToNextEndpoint = true;
-          }
-          break
-        }
-
-        const { response, clearTimer } = outcome
-        if (response.ok) {
-          workingRouteByKey.set(cleanKey, {
-            url: endpoint,
-            authMode,
-            thinkingMode,
-          })
-          try {
-            const data = (await response.json()) as RawGeminiResponse
-            return extractResponseText(data)
-          } finally {
-            clearTimer()
-          }
-        }
-
-        if (cachedRoute && cachedRoute.url === endpoint && cachedRoute.authMode === authMode) {
-          workingRouteByKey.delete(cleanKey)
-        }
-
-        let errInfo;
-        try {
-          errInfo = await readErrorDetails(response)
-        } finally {
-          clearTimer()
-        }
-        if (epIdx === 0 && primaryParsedError === null) {
-          primaryParsedError = errInfo
-        }
-        lastParsedError = errInfo
-
-        // 1. Adaptation automatique du paramètre thinking si l'endpoint rejette thinkingLevel
-        if (isThinkingOrConfigError(errInfo)) {
-          if (thinkingMode === 'level') {
-            thinkingMode = 'budget'
-            continue
-          }
-          if (thinkingMode === 'budget') {
-            thinkingMode = 'none'
-            continue
-          }
-        }
-
-        // 2. Nouvelle clé / Free Tier : retry automatique sur 429 ou indisponibilité transitoire 5xx
-        if (
-          (errInfo.status === 429 ||
-            errInfo.status === 500 ||
-            errInfo.status === 502 ||
-            errInfo.status === 503 ||
-            errInfo.status === 504) &&
-          rateRetry < maxRateRetries
-        ) {
-          rateRetry += 1
-          const baseWait = isTestEnv() ? 15 : 1_800 * rateRetry
-          const waitMs =
-            !isTestEnv() && errInfo.retryAfterMs !== null ? errInfo.retryAfterMs : baseWait
-          await sleep(waitMs)
-          continue
-        }
-
-        // 3. Si 404 (modèle/version sur un autre chemin) : inutile de retenter en `?key=` sur la même URL,
-        //    on passe directement à l'endpoint candidat suivant (v1alpha / v1 / Vertex <-> AI Studio).
-        if (errInfo.status === 404) {
-          moveToNextEndpoint = true
-          break
-        }
-
-        // 4. Si erreur d'authentification / service désactivé (ex: clé GCP AIza sur AI Studio ou clé AQ. sans ?key=) :
-        //    on tente le mode `?key=` puis les autres endpoints candidats.
-        if (isKeyOrEndpointMismatch(errInfo)) {
-          break
-        }
-
-        // 5. Quota `limit: 0` propre à un endpoint : inutile de retenter la même URL en `?key=`,
-        //    on passe directement à l'endpoint candidat suivant.
-        if (errInfo.status === 429 && epIdx < endpoints.length - 1 && /limit:\s*0\b/i.test(errInfo.message)) {
-          moveToNextEndpoint = true
-          break
-        }
-
-        // 6. 429 / 5xx persistant après les réessais internes : ne pas faire échouer tout le
-        //    test sur cette route. On laisse leur chance au mode d'auth puis aux autres endpoints
-        //    (surcharge/quota locale d'un endpoint Google souvent spécifique à une route).
-        if (
-          errInfo.status === 429 ||
-          errInfo.status === 500 ||
-          errInfo.status === 502 ||
-          errInfo.status === 503 ||
-          errInfo.status === 504
-        ) {
-          break
-        }
-
-        throw new Error(formatFriendlyApiError(errInfo))
-      }
-
-      if (moveToNextEndpoint) {
-        break
-      }
-    }
-  }
-
-  const errorToReport = primaryParsedError ?? lastParsedError
-  if (errorToReport) {
-    throw new Error(formatFriendlyApiError(errorToReport))
-  }
-  if (sawNetworkError) {
-    throw new Error('Réseau indisponible ou délai dépassé.')
-  }
-  throw new Error('Impossible de joindre Gemini.')
-}
-
-async function postGenerateContent(params: {
-  apiKey: string
-  prompt: string
-  responseSchema: Record<string, unknown>
-  timeoutMs?: number
-  priority?: 'high' | 'normal'
-}): Promise<string> {
-  const {
-    apiKey,
-    prompt,
-    responseSchema,
-    timeoutMs = 90_000,
-    priority = 'normal',
-  } = params
-  const cleanKey = sanitizeApiKey(apiKey)
-  if (!cleanKey) {
-    throw new Error('Clé API manquante.')
-  }
-
-  return enqueueGeminiRequest(
-    () =>
-      executeGenerateContentHttp({
-        cleanKey,
-        prompt,
-        responseSchema,
-        timeoutMs,
-      }),
-    priority,
-  )
-}
-
-export async function testGeminiConnection(
-  apiKey: string,
-): Promise<{ ok: boolean; message: string }> {
-  try {
-    await postGenerateContent({
-      apiKey,
-      prompt: 'Réponds uniquement {"status":"ok"} en JSON.',
-      responseSchema: {
-        type: 'OBJECT',
-        properties: { status: { type: 'STRING' } },
-        required: ['status'],
-      },
-      // Le tier gratuit de gemini-3.8-flash (thinking HIGH) peut mettre 30-50 s à répondre :
-      // on laisse plus de marge qu'un simple ping, et un timeout bascule désormais sur
-      // les routes candidates au lieu d'échouer immédiatement.
-      timeoutMs: 60_000,
-      priority: 'high',
-    })
-    return {
-      ok: true,
-      message: `OK (${GEMINI_MODEL} · ${GEMINI_THINKING_LEVEL})`,
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      message: err instanceof Error ? err.message : 'Échec du test.',
-    }
-  }
-}
+import { buildCoachPrompt, guardExercisePlan } from './coachPrompt'
+import { generateJson, getGeminiConfig, postGenerateContent } from './geminiClient'
+
+export * from './geminiClient'
+export { buildCoachPrompt, computeExerciseTrend, guardExercisePlan } from './coachPrompt'
 
 /* -------------------------------------------------------------------------- */
 /* Empreinte d'une section pour savoir si la séance est déjà pré-générée      */
@@ -654,7 +53,7 @@ export function buildSectionPlanFingerprint(
     .join('|')
 
   const cleanPreamble = preamble.trim()
-  return `plan-v2:${section}:${cleanPreamble.length}:${cleanPreamble.slice(0, 64)}:${cleanPreamble.slice(-64)}::${exSig}`
+  return `plan-v3:${section}:${cleanPreamble.length}:${cleanPreamble.slice(0, 64)}:${cleanPreamble.slice(-64)}::${exSig}`
 }
 
 export function isGeminiPlanFresh(
@@ -766,100 +165,21 @@ export function buildCoachPromptForSection(params: {
   preamble?: string
   settings: Pick<AppSettings, 'profileHeightCm' | 'profileWeightKg'>
 }): string {
-  const { section, exercises, preamble, settings } = params
-  const activeExercises = exercises.filter((e) => e.section === section && e.active)
-  const athleteRules = extractAthleteRulesFromPreamble(preamble)
-
-  const payload = activeExercises.map((ex, idx) => {
-    const ddpReference = computeExerciseDdpPlan(ex)
-    const enrichedNewestFirst = [...buildEnrichedChronology(ex)].reverse()
-    const variantByEntryId = new Map(
-      enrichedNewestFirst.map((item) => [item.entry.id, item.variant]),
-    )
-
-    const recentSessions = ex.entries
-      .filter((e) => !e.skipOnly && e.sets.length > 0)
-      .slice(0, 6)
-      .map((entry) => ({
-        date: formatIsoToFr(entry.date),
-        equipment_variant: variantByEntryId.get(entry.id) ?? 'Standard',
-        formatted: formatSetsForNotepad(entry.sets, ex.unit),
-        sets_detail: entry.sets.map((s) => ({
-          weight_kg: s.weight,
-          reps: s.reps,
-          is_warmup: Boolean(s.isWarmup),
-          reached_failure: Boolean(s.failure),
-          ...(s.workSeconds ? { work_seconds: s.workSeconds } : {}),
-          ...(s.restBeforeSeconds ? { rest_before_seconds: s.restBeforeSeconds } : {}),
-        })),
-        rest_seconds: entry.restSeconds,
-        ...(entry.workSeconds ? { exercise_work_seconds: entry.workSeconds } : {}),
-        ...(entry.sessionDurationSeconds
-          ? { session_duration_seconds: entry.sessionDurationSeconds }
-          : {}),
-        user_comment: entry.note,
-      }))
-
-    const recentSkipNotes = ex.entries
-      .filter((e) => e.skipOnly && e.note.trim().length > 0)
-      .slice(0, 2)
-      .map((e) => e.note.trim())
-
-    return {
-      order_in_session: idx + 1,
-      exercise_id: ex.id,
-      name: ex.name,
-      category:
-        ex.category === 'poly'
-          ? `polyarticulaire (${ex.repRange[0]}-${ex.repRange[1]} reps)`
-          : `isolation (${ex.repRange[0]}-${ex.repRange[1]} reps)`,
-      unit: ex.unit,
-      weight_step_kg: ex.weightStep,
-      default_rest_seconds: ex.defaultRestSeconds,
-      ddp_mathematical_baseline: {
-        rest_seconds: ddpReference.restSeconds,
-        sets: ddpReference.sets.map((s) => ({
-          weight: s.weight,
-          reps_min: s.repsMin,
-          reps_max: s.repsMax,
-          target_reps: s.suggestedReps,
-          is_warmup: Boolean(s.isWarmup),
-        })),
-      },
-      recent_sessions: recentSessions,
-      ...(recentSkipNotes.length > 0 ? { recent_context_notes: recentSkipNotes } : {}),
-    }
+  return buildCoachPrompt({
+    section: params.section,
+    exercises: params.exercises,
+    athleteRules: extractAthleteRulesFromPreamble(params.preamble),
+    settings: params.settings,
+    todayIso: todayISODate(),
   })
-
-  return `Tu es un coach scientifique expert en hypertrophie et biomécanique appliquant la Double Progression Dynamique (DDP).
-Date de référence : ${formatIsoToFr(todayISODate())}.
-Profil athlète : ${settings.profileHeightCm} cm, ${settings.profileWeightKg} kg — objectif hypertrophie naturelle.
-Séance cible à planifier maintenant : ${SECTION_LABELS[section].title} (cette séance peut être lancée aujourd'hui ou pré-générée à l'avance pour la prochaine venue à la salle : base-toi exclusivement sur l'historique de ${SECTION_LABELS[section].title} fourni ci-dessous).
-
-${athleteRules ? `Consignes personnelles de l'athlète (issues de son fichier .txt) :\n${athleteRules}\n` : ''}RÈGLES DE PROGRAMMATION SCIENTIFIQUES & PRATIQUES :
-1. Analyse en priorité recent_sessions[0] (la dernière séance réalisée) et la tendance des séances précédentes sur le MÊME equipment_variant :
-   - Ne mélange jamais les charges de deux machines ou variantes différentes (ex: "Presse poids dos" vs "Par côté", "Poulie haute" vs "Standard", "Debout (Calf)" vs "Assis").
-2. Double Progression Dynamique (DDP) série par série (référence fournie dans ddp_mathematical_baseline) :
-   - Polyarticulaires (${section === 'up' ? 'développés, tirages' : 'presse, roumain, leg extension, leg curl'}) : fourchette 8 à 12 reps. Si la Série 1 de travail a validé >= 12 reps propres, monte la Série 1 d'un palier réaliste (+weight_step_kg) et vise 8–10 reps (target_reps = 9, ou 8 si le saut relatif en % est élevé comme aux haltères). Garde les séries suivantes (S2, S3) à l'ancien poids tant qu'elles n'ont pas validé 12 reps (top-set + back-off sets), ou monte-les d'un cran si elles ont validé 12 reps sans dépasser la charge de S1. Sinon, conserve la charge et vise +1 rep (target_reps = dernière rep + 1, plafonné à 12).
-   - Isolation (élévations latérales, triceps, biceps, mollets, abdos) : fourchette 12 à 15 reps. Monte d'un cran à 15 reps validées (vise 12–14 reps, target_reps = 12 ou 13), sinon conserve la charge et vise +1 rep.
-3. Adaptation intelligente aux commentaires (user_comment), à l'échec (reached_failure) et à la fatigue en cours de séance (order_in_session) :
-   - Si l'athlète écrit "trop facile", "j'aurais pu faire 13-14", "je me suis limité" ou suggère un poids précis (ex: "80kg facile, peut-être 90 si j'ai pas l'autre") -> suis ce ressenti et ajuste la charge/reps en conséquence.
-   - Si échec prématuré (chute franche des reps sur S2/S3), souffle court, malaise évoqué, reprise après pause ou gêne -> stabilise la charge sans monter prématurément, fixe un target_reps réaliste et accorde un repos suffisant (150–180s polyarticulaire intense, 90–150s isolation).
-4. Échauffements & paliers réels de salle :
-   - Conserve fidèlement les séries d'échauffement habituelles de l'athlète (is_warmup: true, ex: 10kg x 12 au développé incliné, montée progressive à la presse) sans inventer d'échauffements sur les exercices où il n'en fait jamais.
-   - Utilise uniquement des charges réalistes en salle selon weight_step_kg (0 pour poids du corps) et renseigne précisément target_reps (l'objectif exact du jour sur chaque série, compris entre reps_min et reps_max).
-5. Réponse JSON pure conforme au schéma demandé (aucun bloc Markdown) :
-   - summary_lines : 2 à 4 phrases courtes, précises et concrètes en français (virgule décimale française, ex: "22,5 kg") résumant les progressions clés du jour.
-   - exercises : inclut OBLIGATOIREMENT chaque exercise_id fourni, avec tip court (< 120 caractères) directement utile sous la barre.
-
-Historique complet par exercice (JSON) :
-${JSON.stringify(payload)}`
 }
 
 interface RawGeminiPlanJson {
   summary_lines?: unknown
   exercises?: unknown
 }
+
+export const COACH_REQUEST_TAG = 'coach-plan'
 
 export async function generateGeminiSessionPlan(params: {
   section: SectionId
@@ -873,11 +193,12 @@ export async function generateGeminiSessionPlan(params: {
   const fingerprint = buildSectionPlanFingerprint(exercises, section, preamble)
   const prompt = buildCoachPromptForSection({ section, exercises, preamble, settings })
 
-  const text = await postGenerateContent({
+  const { text, model: usedModel } = await generateJson({
     apiKey: settings.apiKey,
     prompt,
     responseSchema: COACH_PLAN_SCHEMA,
     priority,
+    tag: COACH_REQUEST_TAG,
   })
 
   let parsed: RawGeminiPlanJson
@@ -934,12 +255,11 @@ export async function generateGeminiSessionPlan(params: {
       )
       const tip = typeof rec.tip === 'string' ? rec.tip.trim().slice(0, 140) : ''
 
-      byId[ex.id] = {
-        exerciseId: ex.id,
-        sets: cleanSets,
-        restSeconds,
-        tip,
-      }
+      byId[ex.id] = guardExercisePlan(
+        ex,
+        { exerciseId: ex.id, sets: cleanSets, restSeconds, tip },
+        computeExerciseDdpPlan(ex),
+      ).plan
     }
   }
 
@@ -953,10 +273,10 @@ export async function generateGeminiSessionPlan(params: {
     section,
     generatedAt: Date.now(),
     source: 'gemini',
-    model: GEMINI_MODEL,
+    model: usedModel,
     fingerprint,
     summaryLines:
-      summaryLines.length > 0 ? summaryLines : [`Objectifs générés (${GEMINI_MODEL} · high).`],
+      summaryLines.length > 0 ? summaryLines : [`Objectifs générés (${usedModel}).`],
     exercises: byId,
   }
 }
@@ -1033,7 +353,7 @@ ${rawText}
     apiKey,
     prompt,
     responseSchema: EXTRACT_WORKOUT_SCHEMA,
-    timeoutMs: 90_000,
+    timeoutMs: 150_000,
     priority: 'high',
   })
 
@@ -1224,7 +544,7 @@ ${JSON.stringify(payload)}`
     apiKey,
     prompt,
     responseSchema: STATS_ANALYSIS_SCHEMA,
-    timeoutMs: 90_000,
+    timeoutMs: 150_000,
     priority: 'normal',
   })
 
@@ -1281,7 +601,7 @@ ${JSON.stringify(payload)}`
   return {
     generatedAt: Date.now(),
     fingerprint: buildStatsFingerprint(exercises, completedSessions),
-    model: GEMINI_MODEL,
+    model: getGeminiConfig().model,
     headline,
     bulletPoints,
     exercises: byId,

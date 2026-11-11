@@ -1,94 +1,218 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { resetGeminiClientState, testGeminiConnection } from './gemini'
+import {
+  configureGemini,
+  GeminiError,
+  generateJson,
+  resetGeminiClientState,
+  sanitizeApiKey,
+  testGeminiConnection,
+} from './gemini'
 
-const TEST_KEY = 'AIzaSyResilienceDummyKey000000000000000000'
+const AQ_KEY = 'AQ.DummyKeyForTests000000000000000'
+const AI_STUDIO = 'generativelanguage.googleapis.com'
+const VERTEX = 'aiplatform.googleapis.com'
 
-const okResponse = () => ({
+const ok = (text = '{"status":"ok"}') => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }),
+})
+
+const fail = (status: number, message: string, details: object[] = []) => ({
+  ok: false,
+  status,
+  json: async () => ({ error: { code: status, message, details } }),
+})
+
+const modelList = (names: string[]) => ({
   ok: true,
   status: 200,
   json: async () => ({
-    candidates: [{ content: { parts: [{ text: '{"status":"ok"}' }] } }],
+    models: names.map((name) => ({
+      name: `models/${name}`,
+      supportedGenerationMethods: ['generateContent'],
+    })),
   }),
 })
 
-const errorResponse = (status: number, message: string) => ({
-  ok: false,
-  status,
-  json: async () => ({ error: { message, details: [{ reason: 'ERROR' }] } }),
-})
+const isList = (url: string) => url.includes('/models?')
 
-const calledUrls = (fetchMock: ReturnType<typeof vi.fn>): string[] =>
-  fetchMock.mock.calls.map((call) => String(call[0]))
+function stubFetch(handler: (url: string, init: RequestInit) => unknown) {
+  const mock = vi.fn(async (url: string, init: RequestInit) => handler(String(url), init))
+  vi.stubGlobal('fetch', mock)
+  return mock
+}
+
+const generationUrls = (mock: ReturnType<typeof stubFetch>): string[] =>
+  mock.mock.calls.map((call) => String(call[0])).filter((url) => !isList(url))
+
+/** Requête qui ne répond jamais, mais respecte l'annulation. */
+const hang = (init: RequestInit) =>
+  new Promise((_, reject) => {
+    init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+  })
 
 afterEach(() => {
   resetGeminiClientState()
   vi.unstubAllGlobals()
 })
 
-describe('testGeminiConnection — résilience du bouton "Tester"', () => {
-  it('bascule sur un autre endpoint quand le premier est en surcharge 503 persistante', async () => {
-    const fetchMock = vi.fn(async (url: string) => {
-      // Le premier endpoint (AI Studio v1beta) répond 503 en continu, les autres vont bien.
-      if (url.includes('generativelanguage.googleapis.com/v1beta/models/')) {
-        return errorResponse(503, 'Service overloaded')
-      }
-      return okResponse()
+describe('client Gemini', () => {
+  it('envoie une clé AQ. sur AI Studio, dans un en-tête, avec gemini-3.8-flash en réflexion HIGH', async () => {
+    const mock = stubFetch(() => ok('{"a":1}'))
+
+    const res = await generateJson({ apiKey: `  ${AQ_KEY}\n`, prompt: 'p' })
+
+    expect(res).toMatchObject({ text: '{"a":1}', model: 'gemini-3.8-flash', channel: 'ai_studio' })
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`https://${AI_STUDIO}/v1beta/models/gemini-3.8-flash:generateContent`)
+    expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe(AQ_KEY)
+    expect(JSON.parse(init.body as string).generationConfig).toEqual({
+      responseMimeType: 'application/json',
+      thinkingConfig: { thinkingLevel: 'HIGH' },
     })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const res = await testGeminiConnection(TEST_KEY)
-
-    expect(res.ok).toBe(true)
-    const urls = calledUrls(fetchMock)
-    // Plusieurs tentatives ont eu lieu avant de basculer, et une route saine a fini par répondre.
-    expect(urls.length).toBeGreaterThan(1)
-    expect(urls.some((u) => u.includes('/v1alpha/') || u.includes('aiplatform'))).toBe(true)
   })
 
-  it('poursuit sur les routes candidates après une coupure réseau / timeout au lieu d\u2019échouer immédiatement', async () => {
-    const fetchMock = vi.fn(async (url: string) => {
-      // AI Studio injoignable (CORS, coupure ou abort), Vertex répond correctement.
-      if (url.includes('generativelanguage.googleapis.com')) {
-        throw new TypeError('Failed to fetch')
-      }
-      return okResponse()
-    })
-    vi.stubGlobal('fetch', fetchMock)
+  it('retire thinkingLevel si le point d’accès le refuse, et n’envoie rien de tel aux modèles 2.x', async () => {
+    const mock = stubFetch((_url, init) =>
+      JSON.parse(init?.body as string).generationConfig.thinkingConfig
+        ? fail(400, 'Invalid JSON payload received. Unknown name "thinkingLevel" at generation_config.thinking_config')
+        : ok(),
+    )
 
-    const res = await testGeminiConnection(TEST_KEY)
+    const res = await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
+    expect(res.model).toBe('gemini-3.8-flash')
+    const bodies = mock.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string).generationConfig)
+    expect(bodies[0].thinkingConfig).toEqual({ thinkingLevel: 'HIGH' })
+    expect(bodies[1].thinkingConfig).toBeUndefined()
 
-    expect(res.ok).toBe(true)
-    expect(calledUrls(fetchMock).some((u) => u.includes('aiplatform.googleapis.com'))).toBe(true)
+    configureGemini({ model: 'gemini-2.5-flash' })
+    await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
+    const last = mock.mock.calls.at(-1) as [string, RequestInit]
+    expect(JSON.parse(last[1].body as string).generationConfig.thinkingConfig).toBeUndefined()
   })
 
-  it('continue les autres routes quand une clé essuie un 429 de quota (hors limit: 0) persistant', async () => {
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes('generativelanguage.googleapis.com/v1beta/models/')) {
-        return errorResponse(429, 'Resource exhausted: rate limit exceeded')
-      }
-      return okResponse()
-    })
-    vi.stubGlobal('fetch', fetchMock)
+  it('passe sur Vertex quand AI Studio refuse la clé, puis retient ce canal', async () => {
+    const mock = stubFetch((url) =>
+      url.includes(AI_STUDIO)
+        ? fail(400, 'API key not valid. Please pass a valid API key.', [{ reason: 'API_KEY_INVALID' }])
+        : ok(),
+    )
 
-    const res = await testGeminiConnection(TEST_KEY)
+    await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
+    await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
 
-    expect(res.ok).toBe(true)
-    expect(calledUrls(fetchMock).length).toBeGreaterThan(1)
+    expect(generationUrls(mock).map((url) => url.includes(VERTEX))).toEqual([false, true, true])
   })
 
-  it('renvoie une erreur aimable (sans exception) quand toutes les routes échouent, après avoir tout tenté', async () => {
-    const fetchMock = vi.fn(async () => errorResponse(503, 'Service overloaded'))
-    vi.stubGlobal('fetch', fetchMock)
+  it('réessaie une surcharge passagère sans changer de modèle', async () => {
+    let calls = 0
+    const mock = stubFetch(() => {
+      calls += 1
+      return calls < 3 ? fail(503, 'The model is overloaded.') : ok()
+    })
 
-    const res = await testGeminiConnection(TEST_KEY)
+    const res = await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
+
+    expect(res.model).toBe('gemini-3.8-flash')
+    expect(mock).toHaveBeenCalledTimes(3)
+  })
+
+  it('se rabat sur le modèle de secours quand le modèle choisi ne répond pas', async () => {
+    configureGemini({ model: 'gemini-3.8-flash' })
+    const mock = stubFetch((url, init) => (url.includes('gemini-3.8-flash') ? hang(init) : ok()))
+
+    const res = await generateJson({ apiKey: AQ_KEY, prompt: 'p', timeoutMs: 20 })
+
+    expect(res.model).toBe('gemini-2.5-flash')
+    expect(generationUrls(mock).at(-1)).toContain('gemini-2.5-flash:generateContent')
+  })
+
+  it('signale un délai dépassé quand le secours est désactivé', async () => {
+    configureGemini({ model: 'gemini-3.8-flash' })
+    stubFetch((_url, init) => hang(init))
+
+    const err = await generateJson({
+      apiKey: AQ_KEY,
+      prompt: 'p',
+      timeoutMs: 20,
+      allowModelFallback: false,
+    }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(GeminiError)
+    expect((err as GeminiError).kind).toBe('timeout')
+    expect((err as GeminiError).message).toContain('gemini-3.8-flash')
+  })
+
+  it('explique chaque refus en clair, sans jamais afficher la clé', async () => {
+    const cases: [number, string, object[], string][] = [
+      [400, 'API key not valid. Please pass a valid API key.', [{ reason: 'API_KEY_INVALID' }], 'key_invalid'],
+      [403, 'Requests from referer https://x are blocked.', [{ reason: 'API_KEY_HTTP_REFERRER_BLOCKED' }], 'referrer'],
+      [403, 'Generative Language API has not been used in project 1 before or it is disabled.', [{ reason: 'SERVICE_DISABLED' }], 'api_disabled'],
+      [404, 'models/x is not found for API version v1beta', [], 'model_not_found'],
+      [429, 'You exceeded your current quota, limit: 0', [], 'quota'],
+      [400, 'Invalid JSON payload received.', [], 'bad_request'],
+    ]
+
+    for (const [status, message, details, kind] of cases) {
+      resetGeminiClientState()
+      stubFetch(() => fail(status, message, details))
+      const err = await generateJson({
+        apiKey: AQ_KEY,
+        prompt: 'p',
+        allowModelFallback: false,
+      }).catch((e: unknown) => e)
+
+      expect(err).toBeInstanceOf(GeminiError)
+      expect((err as GeminiError).kind).toBe(kind)
+      expect((err as GeminiError).message).not.toContain(AQ_KEY)
+    }
+  })
+
+  it('nettoie une clé collée avec son nom de variable, des guillemets ou des espaces', () => {
+    expect(sanitizeApiKey('  GEMINI_API_KEY="AIzaSyExampleKey123"\n')).toBe('AIzaSyExampleKey123')
+    expect(sanitizeApiKey('Bearer AQ.abc\u200B def')).toBe('AQ.abcdef')
+    expect(sanitizeApiKey('')).toBe('')
+  })
+})
+
+describe('bouton « Tester la clé »', () => {
+  it('confirme la connexion et liste les modèles texte disponibles', async () => {
+    stubFetch((url) =>
+      isList(url)
+        ? modelList(['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-preview-tts', 'text-embedding-004'])
+        : ok(),
+    )
+
+    const res = await testGeminiConnection(AQ_KEY)
+
+    expect(res.ok).toBe(true)
+    expect(res.message).toContain('gemini-3.8-flash · HIGH')
+    expect(res.models).toEqual(['gemini-2.5-flash', 'gemini-2.5-pro'])
+  })
+
+  it('propose le modèle de secours quand celui choisi est saturé', async () => {
+    configureGemini({ model: 'gemini-3.8-flash' })
+    stubFetch((url) => {
+      if (isList(url)) return modelList(['gemini-2.5-flash'])
+      return url.includes('gemini-3.8-flash') ? fail(503, 'The model is overloaded.') : ok()
+    })
+
+    const res = await testGeminiConnection(AQ_KEY)
+
+    expect(res).toMatchObject({ ok: false, kind: 'overloaded', suggestedModel: 'gemini-2.5-flash' })
+  })
+
+  it('rend un message clair, sans exception, quand rien ne répond', async () => {
+    stubFetch(() => {
+      throw new TypeError('Failed to fetch')
+    })
+
+    const res = await testGeminiConnection(AQ_KEY)
 
     expect(res.ok).toBe(false)
-    expect(res.message).toMatch(/503/)
-    // Le test ne doit pas abandonner à la première route : les 4 endpoints (dont Vertex)
-    // et les 2 modes d'auth sont épuisés avant de rendre une erreur aimable.
-    const urls = calledUrls(fetchMock)
-    expect(urls.some((u) => u.includes('aiplatform.googleapis.com'))).toBe(true)
-    expect(urls.some((u) => u.includes('/v1alpha/'))).toBe(true)
-    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(8)
+    expect(res.kind).toBe('network')
+    expect(res.models).toBeUndefined()
+    expect((await testGeminiConnection('  ')).kind).toBe('missing_key')
   })
 })
