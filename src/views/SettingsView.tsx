@@ -3,6 +3,7 @@ import { ArrowLeft, Eye, EyeOff, FlaskConical, Loader2, Moon, Sun, Trash2, Wifi 
 import {
   DEFAULT_GEMINI_MODEL,
   SUGGESTED_GEMINI_MODELS,
+  modelLabel,
   detectApiProvider,
   sanitizeApiKey,
   testGeminiConnection,
@@ -149,7 +150,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
           >
             {modelOptions.map((model) => (
               <option key={model} value={model}>
-                {model === DEFAULT_GEMINI_MODEL ? `${model} (rapide, recommandé)` : model}
+                {model === DEFAULT_GEMINI_MODEL ? `${modelLabel(model)} (recommandé)` : modelLabel(model)}
               </option>
             ))}
           </select>

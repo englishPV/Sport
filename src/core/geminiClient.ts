@@ -3,11 +3,27 @@
  * reprises, délais et diagnostic d'erreur lisible. Aucune logique métier ici.
  */
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash'
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash'
 /** Modèle de secours quand le modèle choisi ne répond pas. */
 export const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash'
 /** Proposés tant que la liste réelle n'a pas été lue avec la clé. */
-export const SUGGESTED_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3.5-flash']
+export const SUGGESTED_GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro']
+
+/**
+ * Les modèles Gemini 3+ acceptent `thinkingLevel` : on demande HIGH (réflexion maximale).
+ * Les 2.x gardent leur réflexion par défaut (ils refusent `thinkingLevel`).
+ */
+export function thinkingLevelFor(model: string): 'HIGH' | null {
+  const m = /^gemini-(\d+)/i.exec(model.trim())
+  return m && Number(m[1]) >= 3 ? 'HIGH' : null
+}
+
+export function modelLabel(model: string): string {
+  return thinkingLevelFor(model) ? `${model} · HIGH` : model
+}
+
+/** Endpoint/modèle qui a refusé `thinkingConfig` : on ne le renvoie plus. */
+const thinkingRejected = new Set<string>()
 
 export type GeminiChannel = 'auto' | 'ai_studio' | 'vertex'
 type ConcreteChannel = Exclude<GeminiChannel, 'auto'>
@@ -69,7 +85,8 @@ export const CHANNEL_LABEL: Record<ConcreteChannel, string> = {
   vertex: 'Vertex AI Express',
 }
 
-const GENERATION_TIMEOUT_MS = 90_000
+/** La réflexion HIGH des modèles 3.x prend 2 à 4 min sur une séance complète (mesuré). */
+const GENERATION_TIMEOUT_MS = 300_000
 const TEST_TIMEOUT_MS = 25_000
 const LIST_TIMEOUT_MS = 15_000
 const RETRY_DELAYS_MS = [1500, 4000]
@@ -200,6 +217,7 @@ export function resetGeminiClientState(): void {
   for (const task of dropped) task.reject(new GeminiError('cancelled', 'Requête annulée.'))
   queueBusy = false
   workingChannelByRoute.clear()
+  thinkingRejected.clear()
   config = { model: DEFAULT_GEMINI_MODEL, channel: 'auto', baseUrl: '' }
 }
 
@@ -388,13 +406,44 @@ async function callChannel(params: {
   responseSchema?: Record<string, unknown>
   timeoutMs: number
 }): Promise<GeminiJsonResult> {
-  const { cleanKey, channel, model, prompt, responseSchema, timeoutMs } = params
+  const { channel, model } = params
+  const routeKey = `${channel}|${model}`
+  const level = thinkingRejected.has(routeKey) ? null : thinkingLevelFor(model)
+  try {
+    return await callChannelOnce({ ...params, thinkingLevel: level })
+  } catch (err) {
+    // Endpoint qui ne connaît pas thinkingLevel : on réessaie une fois sans.
+    if (level && err instanceof GeminiError && err.kind === 'bad_request' && /thinking/i.test(`${err.message} ${err.detail}`)) {
+      thinkingRejected.add(routeKey)
+      return callChannelOnce({ ...params, thinkingLevel: null })
+    }
+    throw err
+  }
+}
+
+async function callChannelOnce(params: {
+  cleanKey: string
+  channel: ConcreteChannel
+  model: string
+  prompt: string
+  responseSchema?: Record<string, unknown>
+  timeoutMs: number
+  thinkingLevel: 'HIGH' | null
+}): Promise<GeminiJsonResult> {
+  const { cleanKey, channel, model, prompt, responseSchema, timeoutMs, thinkingLevel } = params
   const startedAt = Date.now()
+  // Mesuré avec gemini-3.8-flash HIGH : un responseSchema imposé fait exploser la réflexion
+  // (≈ 46 k jetons, 4 min) contre ≈ 15 k jetons et < 2 min avec le schéma dans le prompt.
+  const inlineSchema = Boolean(responseSchema) && thinkingLevelFor(model) !== null
+  const promptText = inlineSchema
+    ? `${prompt}\n\nRéponds uniquement par un objet JSON valide conforme à ce schéma (types OpenAPI) :\n${JSON.stringify(responseSchema)}`
+    : prompt
   const body = JSON.stringify({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    contents: [{ role: 'user', parts: [{ text: promptText }] }],
     generationConfig: {
       responseMimeType: 'application/json',
-      ...(responseSchema ? { responseSchema } : {}),
+      ...(responseSchema && !inlineSchema ? { responseSchema } : {}),
+      ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
     },
   })
 
@@ -582,7 +631,7 @@ export async function testGeminiConnection(apiKey: string): Promise<ConnectionTe
       ok: true,
       models,
       latencyMs: res.latencyMs,
-      message: `Connexion réussie : ${model} a répondu en ${(res.latencyMs / 1000).toFixed(1).replace('.', ',')} s (${CHANNEL_LABEL[res.channel]}).`,
+      message: `Connexion réussie : ${modelLabel(model)} a répondu en ${(res.latencyMs / 1000).toFixed(1).replace('.', ',')} s (${CHANNEL_LABEL[res.channel]}).`,
     }
   } catch (raw) {
     const err = raw instanceof GeminiError ? raw : new GeminiError('unknown', 'Échec du test.')

@@ -179,10 +179,10 @@ describe('parseNotepad sur le vrai bloc-notes utilisateur', () => {
 })
 
 describe('Client Gemini', () => {
-  it('vise AI Studio avec gemini-2.5-flash par défaut, Vertex en secours', () => {
-    expect(DEFAULT_GEMINI_MODEL).toBe('gemini-2.5-flash')
+  it('vise AI Studio avec gemini-3.8-flash par défaut, Vertex en secours', () => {
+    expect(DEFAULT_GEMINI_MODEL).toBe('gemini-3.8-flash')
     expect(buildEndpointUrl('ai_studio')).toBe(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
     )
     expect(buildEndpointUrl('vertex', 'gemini-2.5-pro')).toBe(
       'https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent',
@@ -237,15 +237,15 @@ describe('Client Gemini', () => {
     })
 
     expect(plan.source).toBe('gemini')
-    expect(plan.model).toBe('gemini-2.5-flash')
+    expect(plan.model).toBe('gemini-3.8-flash')
     expect(plan.exercises['ex-souleve-de-terre-roumain'].sets[0].weight).toBe(24)
     expect(plan.exercises['ex-leg-press']).toBeDefined()
 
-    // Vérifie que la requête envoie bien le bon modèle, sans réglage de réflexion
+    // Vérifie que la requête envoie bien le bon modèle, en réflexion HIGH
     const [calledUrl, calledInit] = mockFetch.mock.calls[0] as [string, RequestInit]
-    expect(calledUrl).toContain('gemini-2.5-flash:generateContent')
+    expect(calledUrl).toContain('gemini-3.8-flash:generateContent')
     const sentBody = JSON.parse(calledInit.body as string)
-    expect(sentBody.generationConfig.thinkingConfig).toBeUndefined()
+    expect(sentBody.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH' })
     expect(sentBody.contents[0].parts[0].text).toContain('exercise_id')
   })
 
@@ -393,7 +393,7 @@ describe('Temps de repos scientifiques hypertrophie (restScience)', () => {
       apiKey: TEST_VERTEX_KEY,
     })
 
-    expect(stats.model).toBe('gemini-2.5-flash')
+    expect(stats.model).toBe('gemini-3.8-flash')
     expect(stats.headline).toContain('Progression régulière')
     expect(stats.exercises['ex-leg-press'].badge).toBe('Nouvelle machine')
   })

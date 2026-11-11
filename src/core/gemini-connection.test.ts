@@ -58,18 +58,38 @@ afterEach(() => {
 })
 
 describe('client Gemini', () => {
-  it('envoie une clé AQ. sur AI Studio, dans un en-tête, sans réglage de réflexion', async () => {
+  it('envoie une clé AQ. sur AI Studio, dans un en-tête, avec gemini-3.8-flash en réflexion HIGH', async () => {
     const mock = stubFetch(() => ok('{"a":1}'))
 
     const res = await generateJson({ apiKey: `  ${AQ_KEY}\n`, prompt: 'p' })
 
-    expect(res).toMatchObject({ text: '{"a":1}', model: 'gemini-2.5-flash', channel: 'ai_studio' })
+    expect(res).toMatchObject({ text: '{"a":1}', model: 'gemini-3.8-flash', channel: 'ai_studio' })
     const [url, init] = mock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe(`https://${AI_STUDIO}/v1beta/models/gemini-2.5-flash:generateContent`)
+    expect(url).toBe(`https://${AI_STUDIO}/v1beta/models/gemini-3.8-flash:generateContent`)
     expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe(AQ_KEY)
     expect(JSON.parse(init.body as string).generationConfig).toEqual({
       responseMimeType: 'application/json',
+      thinkingConfig: { thinkingLevel: 'HIGH' },
     })
+  })
+
+  it('retire thinkingLevel si le point d’accès le refuse, et n’envoie rien de tel aux modèles 2.x', async () => {
+    const mock = stubFetch((_url, init) =>
+      JSON.parse(init?.body as string).generationConfig.thinkingConfig
+        ? fail(400, 'Invalid JSON payload received. Unknown name "thinkingLevel" at generation_config.thinking_config')
+        : ok(),
+    )
+
+    const res = await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
+    expect(res.model).toBe('gemini-3.8-flash')
+    const bodies = mock.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string).generationConfig)
+    expect(bodies[0].thinkingConfig).toEqual({ thinkingLevel: 'HIGH' })
+    expect(bodies[1].thinkingConfig).toBeUndefined()
+
+    configureGemini({ model: 'gemini-2.5-flash' })
+    await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
+    const last = mock.mock.calls.at(-1) as [string, RequestInit]
+    expect(JSON.parse(last[1].body as string).generationConfig.thinkingConfig).toBeUndefined()
   })
 
   it('passe sur Vertex quand AI Studio refuse la clé, puis retient ce canal', async () => {
@@ -94,7 +114,7 @@ describe('client Gemini', () => {
 
     const res = await generateJson({ apiKey: AQ_KEY, prompt: 'p' })
 
-    expect(res.model).toBe('gemini-2.5-flash')
+    expect(res.model).toBe('gemini-3.8-flash')
     expect(mock).toHaveBeenCalledTimes(3)
   })
 
@@ -167,7 +187,7 @@ describe('bouton « Tester la clé »', () => {
     const res = await testGeminiConnection(AQ_KEY)
 
     expect(res.ok).toBe(true)
-    expect(res.message).toContain('gemini-2.5-flash')
+    expect(res.message).toContain('gemini-3.8-flash · HIGH')
     expect(res.models).toEqual(['gemini-2.5-flash', 'gemini-2.5-pro'])
   })
 

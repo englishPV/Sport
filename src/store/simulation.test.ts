@@ -135,10 +135,10 @@ describe('choix du modèle', () => {
     const persist = (settings: object) =>
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { settings }, version: SCHEMA_VERSION }))
 
-    persist({ apiKey: KEY, geminiModel: 'gemini-3.8-flash' })
+    persist({ apiKey: KEY, geminiModel: 'gemini-1.5-flash' })
     await useWorkoutStore.persist.rehydrate()
-    expect(store().settings.geminiModel).toBe('gemini-2.5-flash')
-    expect(getGeminiConfig().model).toBe('gemini-2.5-flash')
+    expect(store().settings.geminiModel).toBe('gemini-3.8-flash')
+    expect(getGeminiConfig().model).toBe('gemini-3.8-flash')
 
     persist({ apiKey: KEY, geminiModel: 'gemini-2.5-pro', geminiModelChosen: true, geminiChannel: 'ai_studio' })
     await useWorkoutStore.persist.rehydrate()
@@ -146,6 +146,6 @@ describe('choix du modèle', () => {
     expect(getGeminiConfig()).toMatchObject({ model: 'gemini-2.5-pro', channel: 'ai_studio' })
 
     store().updateSettings({ geminiModel: '  ' })
-    expect(store().settings).toMatchObject({ geminiModel: 'gemini-2.5-flash', geminiModelChosen: false })
+    expect(store().settings).toMatchObject({ geminiModel: 'gemini-3.8-flash', geminiModelChosen: false })
   })
 })
