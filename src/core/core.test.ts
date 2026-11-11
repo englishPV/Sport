@@ -19,8 +19,10 @@ import {
   DEFAULT_GEMINI_MODEL,
   generateGeminiSessionPlan,
   isGeminiPlanFresh,
+  isSupportedGeminiModel,
   parseWorkoutTextWithGemini,
   resetGeminiClientState,
+  SUGGESTED_GEMINI_MODELS,
 } from './gemini'
 import {
   computeSetRestDuration,
@@ -184,10 +186,24 @@ describe('Client Gemini', () => {
     expect(buildEndpointUrl('ai_studio')).toBe(
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
     )
-    expect(buildEndpointUrl('vertex', 'gemini-2.5-pro')).toBe(
-      'https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent',
+    expect(buildEndpointUrl('vertex')).toBe(
+      'https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.8-flash:generateContent',
     )
     expect(detectApiProvider(TEST_VERTEX_KEY).kind).toBe('vertex_express')
+  })
+
+  it('ne reconnaît comme utilisables que les modèles 3.8 ou plus récents', () => {
+    expect(isSupportedGeminiModel('gemini-3.8-flash')).toBe(true)
+    expect(isSupportedGeminiModel('gemini-3.8-flash-lite')).toBe(true)
+    expect(isSupportedGeminiModel('gemini-3.9-flash')).toBe(true)
+    expect(isSupportedGeminiModel('gemini-4.0-pro')).toBe(true)
+    expect(isSupportedGeminiModel('gemini-2.5-flash')).toBe(false)
+    expect(isSupportedGeminiModel('gemini-2.5-pro')).toBe(false)
+    expect(isSupportedGeminiModel('gemini-1.5-flash')).toBe(false)
+    expect(isSupportedGeminiModel('')).toBe(false)
+    // La liste proposée ne contient aucun modèle 2.x.
+    expect(SUGGESTED_GEMINI_MODELS.every(isSupportedGeminiModel)).toBe(true)
+    expect(SUGGESTED_GEMINI_MODELS.join(' ')).not.toMatch(/gemini-(1|2)\./)
   })
 
   it('parse une réponse structurée Gemini et complète avec le fallback DDP si besoin', async () => {

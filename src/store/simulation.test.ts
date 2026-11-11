@@ -140,10 +140,21 @@ describe('choix du modèle', () => {
     expect(store().settings.geminiModel).toBe('gemini-3.8-flash')
     expect(getGeminiConfig().model).toBe('gemini-3.8-flash')
 
-    persist({ apiKey: KEY, geminiModel: 'gemini-2.5-pro', geminiModelChosen: true, geminiChannel: 'ai_studio' })
+    // Un modèle 3.8+ choisi à la main est conservé.
+    persist({ apiKey: KEY, geminiModel: 'gemini-3.8-flash', geminiModelChosen: true, geminiChannel: 'ai_studio' })
     await useWorkoutStore.persist.rehydrate()
-    expect(store().settings.geminiModel).toBe('gemini-2.5-pro')
-    expect(getGeminiConfig()).toMatchObject({ model: 'gemini-2.5-pro', channel: 'ai_studio' })
+    expect(store().settings.geminiModel).toBe('gemini-3.8-flash')
+    expect(getGeminiConfig()).toMatchObject({ model: 'gemini-3.8-flash', channel: 'ai_studio' })
+
+    // Un ancien réglage 2.x est abandonné : aucun retour possible à cette série.
+    persist({ apiKey: KEY, geminiModel: 'gemini-2.5-pro', geminiModelChosen: true })
+    await useWorkoutStore.persist.rehydrate()
+    expect(store().settings).toMatchObject({ geminiModel: 'gemini-3.8-flash', geminiModelChosen: false })
+    expect(getGeminiConfig().model).toBe('gemini-3.8-flash')
+
+    // Une demande de modèle 2.x est ignorée au profit du modèle unique.
+    store().updateSettings({ geminiModel: 'gemini-2.5-flash' })
+    expect(store().settings).toMatchObject({ geminiModel: 'gemini-3.8-flash', geminiModelChosen: false })
 
     store().updateSettings({ geminiModel: '  ' })
     expect(store().settings).toMatchObject({ geminiModel: 'gemini-3.8-flash', geminiModelChosen: false })

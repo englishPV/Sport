@@ -544,7 +544,8 @@ ${JSON.stringify(payload)}`
     apiKey,
     prompt,
     responseSchema: STATS_ANALYSIS_SCHEMA,
-    timeoutMs: 150_000,
+    // Réflexion HIGH : mesuré 2 à 4 min sur un historique complet, et plus de repli possible.
+    timeoutMs: 300_000,
     priority: 'normal',
   })
 

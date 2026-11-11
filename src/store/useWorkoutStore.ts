@@ -25,6 +25,7 @@ import {
   configureGemini,
   generateGeminiSessionPlan,
   isGeminiPlanFresh,
+  isSupportedGeminiModel,
   parseWorkoutTextWithGemini,
   resetGeminiClientState,
   sanitizeApiKey,
@@ -1342,9 +1343,10 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         const cleanedPatch: Partial<AppSettings> = { ...patch }
         if (patch.apiKey !== undefined) cleanedPatch.apiKey = sanitizeApiKey(patch.apiKey)
         if (patch.geminiModel !== undefined) {
+          // Un modèle hors gemini-3.8-flash (ancien réglage, 2.x…) est refusé : retour au modèle unique.
           const model = patch.geminiModel.trim()
-          cleanedPatch.geminiModel = model || DEFAULT_GEMINI_MODEL
-          cleanedPatch.geminiModelChosen = model !== ''
+          cleanedPatch.geminiModel = isSupportedGeminiModel(model) ? model : DEFAULT_GEMINI_MODEL
+          cleanedPatch.geminiModelChosen = isSupportedGeminiModel(model)
         }
         if (patch.geminiBaseUrl !== undefined) cleanedPatch.geminiBaseUrl = patch.geminiBaseUrl.trim()
         const touchesAi =
@@ -1450,8 +1452,9 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         const persisted = (persistedState ?? {}) as Partial<WorkoutStoreState>
         const rawKey = persisted.settings?.apiKey ?? currentState.settings.apiKey
         const savedModel = persisted.settings?.geminiModel?.trim() ?? ''
-        // Un modèle jamais choisi à la main (anciennes versions) repasse sur le modèle par défaut.
-        const modelChosen = persisted.settings?.geminiModelChosen === true && savedModel !== ''
+        // Un modèle hors gemini-3.8-flash (anciennes versions, série 2.x) est abandonné.
+        const modelChosen =
+          persisted.settings?.geminiModelChosen === true && isSupportedGeminiModel(savedModel)
         return {
           ...currentState,
           ...persisted,
