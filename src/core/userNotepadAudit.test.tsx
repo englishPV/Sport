@@ -128,17 +128,23 @@ describe('Carnet réel collé sur le site (audit & non-régression)', () => {
     expect(dev.entries[0].sets[1].note).toBeUndefined()
     expect(computeExerciseDdpPlan(dev).sets[0]).toMatchObject({ weight: 10, isWarmup: true })
 
-    // Commentaire en S3 reste sur S3 ; préfixe "haltères de" conservé dans entry.note
+    // Commentaire en S3 reste sur S3 ; préfixe "haltères de" conservé dans entry.note ; palier affiné à 1 kg (10kg | 9kg)
     const curl = parsed.exercises.find((e) => e.name.startsWith('Curl incliné'))!
     expect(curl.entries[0].sets[2].note).toBe('1 main par 1 main')
     expect(curl.entries[0].sets[0].note).toBeUndefined()
     expect(curl.entries[1].note).toContain('haltères de')
+    expect(curl.weightStep).toBe(1)
+
+    // Chest press (30kg | 25kg sur les 2 dernières séances) -> palier affiné à 5 kg
+    const chest = parsed.exercises.find((e) => e.name.startsWith('Chest press'))!
+    expect(chest.weightStep).toBe(5)
 
     // Ligne sautée `03/11/2026 ((Repos : 2min)` : note propre et repos habituel 2min30 conservé
     const rdl = parsed.exercises.find((e) => e.name.startsWith('Soulevé'))!
     expect(rdl.entries[0].skipOnly).toBe(true)
     expect(rdl.entries[0].note).toBe('')
     expect(rdl.defaultRestSeconds).toBe(150)
+    expect(rdl.weightStep).toBe(2)
 
     // Tolère les blocs Markdown ``` et le collage sous DEFAULT_NOTEPAD_TEXT sans dupliquer les exos vides
     const fenced = parseNotepad('```txt\n' + USER_PASTED_NOTEPAD_NOV + '\n```', {
@@ -162,8 +168,20 @@ describe('Carnet réel collé sur le site (audit & non-régression)', () => {
     // La variante principale reste Standard (3 séances) au lieu de s'écraser sur le dépannage Calf (1 séance)
     expect(molletsChrono.filter((c) => c.isPrimaryVariant)).toHaveLength(3)
 
-    // Garde-fou IA : autorise le retour aux 4 séries habituelles à 40 kg sur Machine assis
+    // DDP hors-ligne + Garde-fou IA : reviennent tous deux aux 4 séries habituelles à 40 kg sur Machine assis
     const ddpMollets = computeExerciseDdpPlan(mollets)
+    expect(ddpMollets.sets.map((s) => [s.weight, s.suggestedReps])).toEqual([
+      [40, 13],
+      [40, 13],
+      [40, 13],
+      [40, 12],
+    ])
+    // Et si la machine assise est occupée, la variante Debout (Calf) repart bien du 25 kg x 20, 20
+    const ddpCalfVariant = computeExerciseDdpPlan(mollets, 'Debout (Calf)')
+    expect(ddpCalfVariant.sets.map((s) => [s.weight, s.suggestedReps])).toEqual([
+      [30, 14],
+      [30, 14],
+    ])
     const aiRestore = {
       exerciseId: mollets.id,
       restSeconds: 90,
@@ -270,5 +288,30 @@ describe('Carnet réel collé sur le site (audit & non-régression)', () => {
     expect(useWorkoutStore.getState().exercises.some((e) => e.name === 'Soulevé de Terre Roumain')).toBe(
       true,
     )
+
+    // Changement de variante en pleine séance (Machine assis <-> Debout (Calf))
+    const molletsEx = useWorkoutStore
+      .getState()
+      .exercises.find((e) => e.name.startsWith('Machine assis'))!
+    expect(useWorkoutStore.getState().activeDraft.logs[molletsEx.id].sets).toHaveLength(4)
+    expect(useWorkoutStore.getState().activeDraft.logs[molletsEx.id].sets[0].weight).toBe(40)
+    useWorkoutStore.getState().switchDraftExerciseVariant(molletsEx.id, 'Debout (Calf)')
+    expect(useWorkoutStore.getState().activeDraft.logs[molletsEx.id].sets).toHaveLength(2)
+    expect(useWorkoutStore.getState().activeDraft.logs[molletsEx.id].sets[0].weight).toBe(30)
+    expect(useWorkoutStore.getState().activeDraft.logs[molletsEx.id].note).toBe('Debout (Calf)')
+
+    // Correction directe d'une entrée d'historique sans passer par le gros .txt
+    const curlEx = useWorkoutStore
+      .getState()
+      .exercises.find((e) => e.name.startsWith('Curl incliné'))!
+    const targetEntryId = curlEx.entries[0].id
+    const ok = useWorkoutStore
+      .getState()
+      .updateHistoryEntry(curlEx.id, targetEntryId, '10kg x 15, 13 | 9kg x 14 (Repos : 2min)')
+    expect(ok).toBe(true)
+    const updatedCurl = useWorkoutStore
+      .getState()
+      .exercises.find((e) => e.id === curlEx.id)!
+    expect(updatedCurl.entries[0].sets.map((s) => s.reps)).toEqual([15, 13, 14])
   })
 })

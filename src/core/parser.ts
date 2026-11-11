@@ -56,6 +56,8 @@ export function inferExerciseMeta(name: string): {
   if (
     norm.includes('haltere') ||
     norm.includes('souleve de terre roumain') ||
+    norm.includes('curl') ||
+    norm.includes('elevation') ||
     norm.includes('oiseau') ||
     norm.includes('shrug')
   ) {
@@ -988,6 +990,35 @@ export function parseNotepad(
         ex.entries.find((e) => e.restSeconds !== null && e.restSeconds > 0)
       if (recentWithRest?.restSeconds) {
         ex.defaultRestSeconds = recentWithRest.restSeconds
+      }
+
+      if (ex.unit === 'kg') {
+        const recentEntries = ex.entries.filter((e) => !e.skipOnly && e.sets.length > 0).slice(0, 2)
+        if (recentEntries.length > 0) {
+          const latestWorkWeights = Array.from(
+            new Set(
+              recentEntries[0].sets
+                .filter((s) => !s.isWarmup && s.weight > 0)
+                .map((s) => s.weight),
+            ),
+          )
+          if (latestWorkWeights.length >= 2) {
+            const gap = Math.round(Math.abs(latestWorkWeights[0] - latestWorkWeights[1]) * 100) / 100
+            if (gap === 0.5 || gap === 1 || gap === 1.25 || gap === 2 || gap === 2.5) {
+              ex.weightStep = gap
+            } else if (gap === 5 && ex.weightStep === 2.5 && recentEntries.length >= 2) {
+              const allRecentWork = recentEntries.flatMap((e) =>
+                e.sets.filter((s) => !s.isWarmup && s.weight > 0).map((s) => s.weight),
+              )
+              const hasFractional = allRecentWork.some((w) => w % 1 !== 0)
+              if (!hasFractional && allRecentWork.every((w) => w % 5 === 0)) {
+                ex.weightStep = 5
+              }
+            }
+          } else if (ex.weightStep === 2 && latestWorkWeights.some((w) => w % 2 === 1 && w <= 15)) {
+            ex.weightStep = 1
+          }
+        }
       }
 
       if (ex.archived) {

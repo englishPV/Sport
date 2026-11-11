@@ -1,3 +1,4 @@
+import { buildEnrichedChronology } from './statsEngine'
 import {
   formatIsoToFr,
   formatNumberFr,
@@ -35,12 +36,60 @@ function resolveIntendedWarmupWeight(
   return warmupWeight
 }
 
-export function getLatestEntry(exercise: Exercise, todayIso = todayISODate()): ExerciseEntry | null {
-  return (
-    exercise.entries.find(
-      (e) => !e.skipOnly && e.sets.length > 0 && !isPendingObjective(e, todayIso),
-    ) ?? null
+export function getExerciseVariants(exercise: Exercise, todayIso = todayISODate()): string[] {
+  const realized = exercise.entries.filter(
+    (e) => !e.skipOnly && e.sets.length > 0 && !isPendingObjective(e, todayIso),
   )
+  if (realized.length === 0) return []
+  const chrono = buildEnrichedChronology({ ...exercise, entries: realized })
+  const seen = new Set<string>()
+  // Du plus récent au plus ancien pour mettre les variantes récentes en premier
+  for (let i = chrono.length - 1; i >= 0; i -= 1) {
+    seen.add(chrono[i].variant)
+  }
+  const list = Array.from(seen)
+  if (list.includes('Standard')) {
+    return ['Standard', ...list.filter((v) => v !== 'Standard')]
+  }
+  return list
+}
+
+export function getLatestEntry(
+  exercise: Exercise,
+  todayIso = todayISODate(),
+  variant?: string,
+): ExerciseEntry | null {
+  const realized = exercise.entries.filter(
+    (e) => !e.skipOnly && e.sets.length > 0 && !isPendingObjective(e, todayIso),
+  )
+  if (realized.length === 0) return null
+
+  const chrono = buildEnrichedChronology({ ...exercise, entries: realized })
+  if (chrono.length === 0) return realized[0] ?? null
+
+  if (variant) {
+    for (let i = chrono.length - 1; i >= 0; i -= 1) {
+      if (chrono[i].variant === variant) return chrono[i].entry
+    }
+    return realized[0] ?? null
+  }
+
+  // Si la toute dernière séance est un dépannage isolé d'une seule séance sur une autre
+  // variante alors que les 2+ séances précédentes étaient sur la variante principale Standard
+  // (ex: 03/11 Calf debout après 26/10 et 20/10 sur Machine assis), reprend la dernière séance Standard.
+  const latestChrono = chrono[chrono.length - 1]
+  if (
+    latestChrono &&
+    latestChrono.variant !== 'Standard' &&
+    !latestChrono.isPrimaryVariant &&
+    chrono.length >= 3 &&
+    chrono[chrono.length - 2].variant === 'Standard' &&
+    chrono[chrono.length - 3].variant === 'Standard'
+  ) {
+    return chrono[chrono.length - 2].entry
+  }
+
+  return realized[0] ?? null
 }
 
 export function getLatestSectionDate(
@@ -112,11 +161,11 @@ export function getRecommendedSection(exercises: readonly Exercise[]): {
   }
 }
 
-export function computeExerciseDdpPlan(exercise: Exercise): ExercisePlan {
+export function computeExerciseDdpPlan(exercise: Exercise, variant?: string): ExercisePlan {
   const [minReps, maxReps] = exercise.repRange
   const step = exercise.unit === 'bodyweight' ? 0 : exercise.weightStep
   const restSeconds = exercise.defaultRestSeconds
-  const latest = getLatestEntry(exercise)
+  const latest = getLatestEntry(exercise, todayISODate(), variant)
 
   if (!latest || latest.sets.length === 0) {
     return {

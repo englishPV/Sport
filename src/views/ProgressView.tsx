@@ -4,6 +4,7 @@ import { Collapse } from '../components/motion'
 import { ProgressionChart, type ChartMetric } from '../components/ProgressionChart'
 import { buildStatsFingerprint } from '../core/gemini'
 import { copyText } from '../core/clipboard'
+import { formatEntryForNotepad } from '../core/parser'
 import {
   buildEnrichedChronology,
   computeSmartExerciseInsight,
@@ -112,6 +113,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const profileHeightCm = useWorkoutStore((s) => s.settings.profileHeightCm)
   const profileWeightKg = useWorkoutStore((s) => s.settings.profileWeightKg)
   const deleteHistoryEntry = useWorkoutStore((s) => s.deleteHistoryEntry)
+  const updateHistoryEntry = useWorkoutStore((s) => s.updateHistoryEntry)
   const deleteCompletedSession = useWorkoutStore((s) => s.deleteCompletedSession)
   const toggleExerciseActive = useWorkoutStore((s) => s.toggleExerciseActive)
 
@@ -122,6 +124,11 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const [showHistoryExId, setShowHistoryExId] = useState<string | null>(null)
   const [showRecentTimings, setShowRecentTimings] = useState(false)
   const [showInactiveExercises, setShowInactiveExercises] = useState(false)
+  const [editingEntry, setEditingEntry] = useState<{
+    exerciseId: string
+    entryId: string
+    text: string
+  } | null>(null)
   const [metric, setMetric] = useState<ChartMetric>('maxWeight')
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
 
@@ -604,56 +611,124 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
                       <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
                         {chronoDesc.map((item, itemIdx) => {
                           const entry = item.entry
+                          const isEditingThis =
+                            editingEntry?.exerciseId === ex.id &&
+                            editingEntry?.entryId === entry.id
                           return (
                             <div
                               key={entry.id}
                               style={{ animationDelay: `${Math.min(itemIdx * 25, 150)}ms` }}
-                              className="flex animate-fade-up items-start justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
+                              className="animate-fade-up rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
                             >
-                              <div className="min-w-0 space-y-0.5">
-                                <div className="flex flex-wrap items-center gap-1.5">
-                                  <span className="font-bold text-slate-700 dark:text-slate-200">
-                                    {item.displayDate}
-                                  </span>
-                                  {item.variant !== 'Standard' ? (
-                                    <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-300">
-                                      {item.variant}
-                                    </span>
-                                  ) : null}
-                                  <span className="text-slate-300 dark:text-slate-600">
-                                    ·
-                                  </span>
-                                  <span className="font-mono text-slate-700 dark:text-slate-300">
-                                    {item.setsDisplay}
-                                  </span>
-                                  {entry.restSeconds ? (
-                                    <span className="text-[11px] text-slate-400">
-                                      · repos {formatRestDuration(entry.restSeconds)}
-                                    </span>
-                                  ) : null}
-                                  {entry.workSeconds ? (
-                                    <span className="text-[11px] text-slate-400">
-                                      · effort {formatDurationShort(entry.workSeconds)}
-                                    </span>
+                              {isEditingThis ? (
+                                <div className="space-y-1.5">
+                                  <input
+                                    type="text"
+                                    aria-label={`Ligne de la séance ${item.displayDate}`}
+                                    value={editingEntry.text}
+                                    onChange={(e) =>
+                                      setEditingEntry({
+                                        ...editingEntry,
+                                        text: e.target.value,
+                                      })
+                                    }
+                                    className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-800 focus:border-indigo-400 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                                  />
+                                  <div className="flex justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingEntry(null)}
+                                      className="rounded-lg px-2.5 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-slate-700"
+                                    >
+                                      Annuler
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (
+                                          updateHistoryEntry(
+                                            ex.id,
+                                            entry.id,
+                                            editingEntry.text,
+                                          )
+                                        ) {
+                                          setEditingEntry(null)
+                                        }
+                                      }}
+                                      className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500"
+                                    >
+                                      Enregistrer
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0 space-y-0.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="font-bold text-slate-700 dark:text-slate-200">
+                                        {item.displayDate}
+                                      </span>
+                                      {item.variant !== 'Standard' ? (
+                                        <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-700 dark:text-sky-300">
+                                          {item.variant}
+                                        </span>
+                                      ) : null}
+                                      <span className="text-slate-300 dark:text-slate-600">
+                                        ·
+                                      </span>
+                                      <span className="font-mono text-slate-700 dark:text-slate-300">
+                                        {item.setsDisplay}
+                                      </span>
+                                      {entry.restSeconds ? (
+                                        <span className="text-[11px] text-slate-400">
+                                          · repos {formatRestDuration(entry.restSeconds)}
+                                        </span>
+                                      ) : null}
+                                      {entry.workSeconds ? (
+                                        <span className="text-[11px] text-slate-400">
+                                          · effort {formatDurationShort(entry.workSeconds)}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    {entry.note ? (
+                                      <p className="italic text-slate-500 dark:text-slate-400">
+                                        {entry.note}
+                                      </p>
+                                    ) : null}
+                                  </div>
+
+                                  {!entry.id.startsWith('live-') ? (
+                                    <div className="flex shrink-0 items-center gap-0.5">
+                                      <button
+                                        type="button"
+                                        aria-label={`Modifier la séance ${item.displayDate}`}
+                                        onClick={() =>
+                                          setEditingEntry({
+                                            exerciseId: ex.id,
+                                            entryId: entry.id,
+                                            text: formatEntryForNotepad(entry, ex.unit).replace(
+                                              /^•\s*/,
+                                              '',
+                                            ),
+                                          })
+                                        }
+                                        title="Modifier cette entrée"
+                                        className="rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 transition-all duration-200 hover:bg-indigo-50 hover:text-indigo-600 active:scale-90 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300"
+                                      >
+                                        ✎
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => deleteHistoryEntry(ex.id, entry.id)}
+                                        title="Supprimer cette entrée"
+                                        className="rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 transition-all duration-200 hover:bg-rose-50 hover:text-rose-600 active:scale-90 dark:hover:bg-rose-950/40"
+                                      >
+                                        ×
+                                      </button>
+                                    </div>
                                   ) : null}
                                 </div>
-                                {entry.note ? (
-                                  <p className="italic text-slate-500 dark:text-slate-400">
-                                    {entry.note}
-                                  </p>
-                                ) : null}
-                              </div>
-
-                              {!entry.id.startsWith('live-') ? (
-                                <button
-                                  type="button"
-                                  onClick={() => deleteHistoryEntry(ex.id, entry.id)}
-                                  title="Supprimer cette entrée"
-                                  className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 transition-all duration-200 hover:bg-rose-50 hover:text-rose-600 active:scale-90 dark:hover:bg-rose-950/40"
-                                >
-                                  ×
-                                </button>
-                              ) : null}
+                              )}
                             </div>
                           )
                         })}

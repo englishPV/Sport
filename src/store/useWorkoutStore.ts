@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
-import { inferProfileFromPreamble, settleObjectives } from '../core/parser'
+import { inferProfileFromPreamble, parseEntryLine, settleObjectives } from '../core/parser'
 import {
   buildBackup,
   createMigratingStorage,
@@ -16,6 +16,7 @@ import {
 } from '../core/defaultNotepad'
 import {
   buildDdpSessionPlan,
+  computeExerciseDdpPlan,
   getLatestEntry,
   getRecommendedSection,
 } from '../core/ddp'
@@ -114,6 +115,21 @@ function triggerRestFinishedFeedback(settings: Pick<AppSettings, 'soundEnabled' 
     }
   } catch {
     // Vibration non supportée
+  }
+
+  try {
+    if (
+      (settings.soundEnabled || settings.vibrationEnabled) &&
+      typeof Notification !== 'undefined' &&
+      Notification.permission === 'granted'
+    ) {
+      new Notification('Repos terminé — Série suivante !', {
+        body: 'Il est temps de reprendre ta série.',
+        tag: 'sport-ddp-rest',
+      })
+    }
+  } catch {
+    // Notifications système non supportées
   }
 
   try {
@@ -415,6 +431,7 @@ export interface WorkoutStoreState {
   addSetToExercise: (exerciseId: string) => void
   removeLastUncompletedSet: (exerciseId: string) => void
   skipRemainingSetsOfCurrentExercise: () => void
+  switchDraftExerciseVariant: (exerciseId: string, variant: string) => void
   toggleExerciseActive: (exerciseId: string) => void
   exportBackupJson: (options?: { includeApiKey?: boolean }) => string
   restoreFromBackupJson: (jsonText: string) => void
@@ -429,6 +446,7 @@ export interface WorkoutStoreState {
   ensureSessionPlansGenerated: (primarySection: SectionId) => Promise<void>
   refreshAiStats: (force?: boolean) => Promise<void>
   deleteHistoryEntry: (exerciseId: string, entryId: string) => void
+  updateHistoryEntry: (exerciseId: string, entryId: string, rawLineText: string) => boolean
   deleteCompletedSession: (sessionId: string) => void
 
   importNotepadSmart: (
@@ -959,6 +977,69 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             ...state.activeDraft,
             phaseStartedAt: nextCursor ? now : null,
             logs: updatedLogs,
+          },
+        })
+      },
+
+      switchDraftExerciseVariant: (exerciseId, variant) => {
+        const state = get()
+        const ex = state.exercises.find((e) => e.id === exerciseId)
+        const log = state.activeDraft.logs[exerciseId]
+        if (!ex || !log) return
+
+        const variantPlan = computeExerciseDdpPlan(ex, variant)
+        const prevEntry = getLatestEntry(ex, todayISODate(), variant)
+        const matchedPrevSets = findMatchingPrevSets(variantPlan.sets, prevEntry?.sets ?? [])
+
+        const completedSets = log.sets.filter((s) => s.completedAt !== null)
+        const newPlannedSets: DraftSet[] = variantPlan.sets
+          .slice(completedSets.length)
+          .map((t, offsetIdx) => {
+            const idx = completedSets.length + offsetIdx
+            const prevSet = matchedPrevSets[idx]
+            return {
+              id: log.sets[idx]?.id ?? createId('set'),
+              weight: t.weight,
+              reps: t.suggestedReps,
+              targetWeight: t.weight,
+              targetReps: t.suggestedReps,
+              targetRepsMin: t.repsMin,
+              prevWeight: prevSet ? prevSet.weight : null,
+              prevReps: prevSet ? prevSet.reps : null,
+              isWarmup: Boolean(t.isWarmup),
+              failure: false,
+              completedAt: null,
+              workSeconds: null,
+              restBeforeSeconds: null,
+            }
+          })
+
+        const nextSets =
+          completedSets.length + newPlannedSets.length > 0
+            ? [...completedSets, ...newPlannedSets]
+            : log.sets
+
+        const activeExercises = state.exercises.filter(
+          (e) => e.section === state.activeDraft.section && e.active,
+        )
+        const exIdx = activeExercises.findIndex((e) => e.id === exerciseId)
+        const nextSetIdx =
+          exIdx === state.cursor.exerciseIdx
+            ? Math.min(state.cursor.setIdx, Math.max(0, nextSets.length - 1))
+            : state.cursor.setIdx
+
+        set({
+          cursor: { ...state.cursor, setIdx: nextSetIdx },
+          activeDraft: {
+            ...state.activeDraft,
+            logs: {
+              ...state.activeDraft.logs,
+              [exerciseId]: {
+                ...log,
+                sets: nextSets,
+                note: variant === 'Standard' ? '' : variant,
+              },
+            },
           },
         })
       },
@@ -1494,6 +1575,53 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             ),
           },
         })
+      },
+
+      updateHistoryEntry: (exerciseId, entryId, rawLineText) => {
+        const state = get()
+        const targetEx = state.exercises.find((e) => e.id === exerciseId)
+        const existingEntry = targetEx?.entries.find((e) => e.id === entryId)
+        if (!targetEx || !existingEntry) return false
+
+        const parsedEntry = parseEntryLine(rawLineText)
+        if (!parsedEntry.skipOnly && parsedEntry.sets.length === 0) return false
+
+        const updatedEntry = {
+          ...parsedEntry,
+          id: existingEntry.id,
+          date: parsedEntry.date ?? existingEntry.date,
+          restSeconds: parsedEntry.restSeconds ?? existingEntry.restSeconds,
+          ...(existingEntry.sessionDurationSeconds !== undefined
+            ? { sessionDurationSeconds: existingEntry.sessionDurationSeconds }
+            : {}),
+        }
+
+        const nextExercises = state.exercises.map((ex) =>
+          ex.id === exerciseId
+            ? {
+                ...ex,
+                entries: ex.entries.map((e) => (e.id === entryId ? updatedEntry : e)),
+              }
+            : ex,
+        )
+        const upPlan = buildDdpSessionPlan(nextExercises, 'up')
+        const legsPlan = buildDdpSessionPlan(nextExercises, 'legs')
+        const section = state.activeDraft.section
+        const activePlan = section === 'legs' ? legsPlan : upPlan
+        set({
+          exercises: nextExercises,
+          coachPlans: { up: upPlan, legs: legsPlan },
+          activeDraft: {
+            ...state.activeDraft,
+            logs: buildDraftLogsForSection(
+              nextExercises,
+              section,
+              activePlan,
+              state.activeDraft.logs,
+            ),
+          },
+        })
+        return true
       },
 
       deleteCompletedSession: (sessionId) => {

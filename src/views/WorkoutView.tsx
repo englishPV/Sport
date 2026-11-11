@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { HistoryValueInput } from '../components/HistoryValueInput'
 import { Collapse, Popover, Toast, useDismiss } from '../components/motion'
-import { formatExercisePlanInline, getRecommendedSection } from '../core/ddp'
+import { formatExercisePlanInline, getExerciseVariants, getRecommendedSection } from '../core/ddp'
 import { isGeminiPlanFresh } from '../core/gemini'
 import type { SectionId } from '../core/types'
 import { useNow } from '../hooks/useNow'
@@ -179,6 +179,7 @@ export function WorkoutView() {
   const skipRemainingSetsOfCurrentExercise = useWorkoutStore(
     (s) => s.skipRemainingSetsOfCurrentExercise,
   )
+  const switchDraftExerciseVariant = useWorkoutStore((s) => s.switchDraftExerciseVariant)
   const toggleExerciseActive = useWorkoutStore((s) => s.toggleExerciseActive)
   const saveCompletedWorkout = useWorkoutStore((s) => s.saveCompletedWorkout)
   const discardActiveWorkout = useWorkoutStore((s) => s.discardActiveWorkout)
@@ -271,6 +272,48 @@ export function WorkoutView() {
       onRestCountdownReachedZero()
     }
   }, [sessionPhase, restTimer, restRemainingMs, onRestCountdownReachedZero])
+
+  // Garde l'écran allumé pendant la séance (Wake Lock API) pour éviter la mise en veille pendant le chrono.
+  useEffect(() => {
+    if (sessionPhase !== 'working' && sessionPhase !== 'resting') return
+    if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return
+
+    let sentinel: { release?: () => Promise<void> } | null = null
+    let cancelled = false
+
+    const acquire = async () => {
+      try {
+        const wl = (
+          navigator as unknown as {
+            wakeLock?: { request: (type: 'screen') => Promise<{ release?: () => Promise<void> }> }
+          }
+        ).wakeLock
+        if (!wl || cancelled) return
+        sentinel = await wl.request('screen')
+      } catch {
+        // Wake Lock refusé ou indisponible
+      }
+    }
+
+    const onVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void acquire()
+      }
+    }
+
+    void acquire()
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+
+    return () => {
+      cancelled = true
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
+      void sentinel?.release?.().catch(() => {})
+    }
+  }, [sessionPhase])
 
   const validatedCount = activeExercises.reduce((acc, ex) => {
     const sets = activeDraft.logs[ex.id]?.sets ?? []
@@ -866,6 +909,8 @@ export function WorkoutView() {
 
   const wStyle = PERF_STYLES[weightPerf]
   const rStyle = PERF_STYLES[repsPerf]
+  const currentVariants = getExerciseVariants(currentEx)
+  const activeVariantLabel = currentLog?.note?.trim() || 'Standard'
 
   return (
     <div className="relative mx-auto flex min-h-[84vh] max-w-md animate-fade-in flex-col justify-between px-4 py-3">
@@ -911,6 +956,29 @@ export function WorkoutView() {
                 </button>
               )
             })}
+            {pausedSectionExercises.length > 0 && (
+              <div className="mt-1.5 border-t border-slate-100 pt-1.5 dark:border-slate-800">
+                <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                  En réserve (machine occupée)
+                </p>
+                {pausedSectionExercises.map((ex) => (
+                  <button
+                    key={ex.id}
+                    type="button"
+                    onClick={() => {
+                      toggleExerciseActive(ex.id)
+                      setShowExercisePicker(false)
+                    }}
+                    className="flex w-full items-center justify-between rounded-xl px-3 py-1.5 text-left text-xs text-slate-500 transition-colors hover:bg-slate-50 hover:text-indigo-600 dark:text-slate-400 dark:hover:bg-slate-800/60 dark:hover:text-indigo-300"
+                  >
+                    <span className="truncate">{ex.name}</span>
+                    <span className="ml-2 shrink-0 font-semibold text-indigo-600 dark:text-indigo-400">
+                      + Ajouter
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <div className="mt-1 space-y-1 border-t border-slate-100 pt-1.5 dark:border-slate-800">
             <div className="grid grid-cols-2 gap-1">
@@ -994,6 +1062,31 @@ export function WorkoutView() {
           <h2 className="mt-2.5 text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
             {currentEx.name}
           </h2>
+          {currentVariants.length > 1 && (
+            <div
+              data-testid="variant-switcher"
+              className="mt-2 flex flex-wrap items-center justify-center gap-1"
+            >
+              {currentVariants.map((variant) => {
+                const isSelected = activeVariantLabel === variant
+                return (
+                  <button
+                    key={variant}
+                    type="button"
+                    aria-label={`Variante ${variant}`}
+                    onClick={() => switchDraftExerciseVariant(currentEx.id, variant)}
+                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'bg-slate-100 text-slate-500 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    {variant}
+                  </button>
+                )
+              })}
+            </div>
+          )}
           {currentTip ? (
             <p
               data-testid="coach-tip"
