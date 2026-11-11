@@ -2,8 +2,10 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import { inferProfileFromPreamble, settleObjectives } from '../core/parser'
 import {
+  buildBackup,
   createMigratingStorage,
   migratePersistedState,
+  parseBackup,
   SCHEMA_VERSION,
   STORAGE_KEY,
 } from '../core/storage'
@@ -105,6 +107,45 @@ function cloneDraft(draft: ActiveDraft): ActiveDraft {
   }
 }
 
+function triggerRestFinishedFeedback(settings: Pick<AppSettings, 'soundEnabled' | 'vibrationEnabled'>): void {
+  try {
+    if (settings.vibrationEnabled && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate([180, 80, 180])
+    }
+  } catch {
+    // Vibration non supportée
+  }
+
+  try {
+    if (!settings.soundEnabled || typeof window === 'undefined') return
+    const AudioCtx =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioCtx) return
+    const ctx = new AudioCtx()
+    const now = ctx.currentTime
+    const notes = [587.33, 880]
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(freq, now + idx * 0.16)
+      gain.gain.setValueAtTime(0.001, now + idx * 0.16)
+      gain.gain.exponentialRampToValueAtTime(0.15, now + idx * 0.16 + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.16 + 0.15)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(now + idx * 0.16)
+      osc.stop(now + idx * 0.16 + 0.16)
+    })
+    setTimeout(() => {
+      void ctx.close().catch(() => {})
+    }, 500)
+  } catch {
+    // Web Audio indisponible (jsdom / navigateur restreint)
+  }
+}
+
 function pushSnapshot(stack: readonly UndoSnapshot[], snap: UndoSnapshot): UndoSnapshot[] {
   const next = [...stack, snap]
   return next.length > 30 ? next.slice(next.length - 30) : next
@@ -161,6 +202,7 @@ function buildDraftLogsForSection(
             ...s,
             targetWeight: target.weight,
             targetReps: target.suggestedReps,
+            targetRepsMin: target.repsMin,
             prevWeight: prevSet ? prevSet.weight : s.prevWeight,
             prevReps: prevSet ? prevSet.reps : s.prevReps,
             isWarmup: Boolean(target.isWarmup),
@@ -172,6 +214,7 @@ function buildDraftLogsForSection(
           reps: target.suggestedReps,
           targetWeight: target.weight,
           targetReps: target.suggestedReps,
+          targetRepsMin: target.repsMin,
           prevWeight: prevSet ? prevSet.weight : s.prevWeight,
           prevReps: prevSet ? prevSet.reps : s.prevReps,
           isWarmup: Boolean(target.isWarmup),
@@ -193,6 +236,7 @@ function buildDraftLogsForSection(
         reps: target.suggestedReps,
         targetWeight: target.weight,
         targetReps: target.suggestedReps,
+        targetRepsMin: target.repsMin,
         prevWeight: prevSet ? prevSet.weight : null,
         prevReps: prevSet ? prevSet.reps : null,
         isWarmup: Boolean(target.isWarmup),
@@ -217,6 +261,7 @@ function buildDraftLogsForSection(
                 reps: fallbackReps,
                 targetWeight: 0,
                 targetReps: fallbackReps,
+                targetRepsMin: fallbackReps,
                 prevWeight: prevSet ? prevSet.weight : null,
                 prevReps: prevSet ? prevSet.reps : null,
                 isWarmup: false,
@@ -244,7 +289,7 @@ function findNextUncompletedCursor(
     const sets = logs[ex.id]?.sets ?? []
     const startSet = eIdx === fromExerciseIdx ? fromSetIdx : 0
     for (let sIdx = startSet; sIdx < sets.length; sIdx += 1) {
-      if (sets[sIdx].completedAt === null) {
+      if (sets[sIdx].completedAt === null && !sets[sIdx].skipped) {
         return { exerciseIdx: eIdx, setIdx: sIdx }
       }
     }
@@ -254,7 +299,7 @@ function findNextUncompletedCursor(
     const ex = activeExercises[eIdx]
     const sets = logs[ex.id]?.sets ?? []
     for (let sIdx = 0; sIdx < sets.length; sIdx += 1) {
-      if (sets[sIdx].completedAt === null) {
+      if (sets[sIdx].completedAt === null && !sets[sIdx].skipped) {
         return { exerciseIdx: eIdx, setIdx: sIdx }
       }
     }
@@ -364,9 +409,15 @@ export interface WorkoutStoreState {
   updateDraftSet: (
     exerciseId: string,
     setId: string,
-    patch: Partial<Pick<DraftSet, 'weight' | 'reps' | 'isWarmup' | 'failure'>>,
+    patch: Partial<Pick<DraftSet, 'weight' | 'reps' | 'isWarmup' | 'failure' | 'note'>>,
   ) => void
   updateDraftNote: (exerciseId: string, note: string) => void
+  addSetToExercise: (exerciseId: string) => void
+  removeLastUncompletedSet: (exerciseId: string) => void
+  skipRemainingSetsOfCurrentExercise: () => void
+  toggleExerciseActive: (exerciseId: string) => void
+  exportBackupJson: (options?: { includeApiKey?: boolean }) => string
+  restoreFromBackupJson: (jsonText: string) => void
   saveCompletedWorkout: () => SaveWorkoutSummary | null
   discardActiveWorkout: () => void
   getExercisesWithLiveProgress: () => Exercise[]
@@ -614,6 +665,10 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           ? Math.max(0, Math.round((now - state.restTimer.startedAt) / 1000))
           : 0
 
+        if (!state.simulation) {
+          triggerRestFinishedFeedback(state.settings)
+        }
+
         set({
           sessionPhase: 'working',
           restTimer: null,
@@ -680,7 +735,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           restTimer: state.restTimer ? { ...state.restTimer } : null,
         }
         const sets = state.activeDraft.logs[ex.id]?.sets ?? []
-        const firstUncompleted = sets.findIndex((s) => s.completedAt === null)
+        const firstUncompleted = sets.findIndex((s) => s.completedAt === null && !s.skipped)
         const now = Date.now()
         set({
           undoStack: pushSnapshot(state.undoStack, snapshot),
@@ -765,6 +820,243 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         })
       },
 
+      addSetToExercise: (exerciseId) => {
+        set((state) => {
+          const log = state.activeDraft.logs[exerciseId]
+          if (!log) return state
+          const snapshot: UndoSnapshot = {
+            activeDraft: cloneDraft(state.activeDraft),
+            sessionPhase: state.sessionPhase,
+            cursor: { ...state.cursor },
+            restTimer: state.restTimer ? { ...state.restTimer } : null,
+          }
+          const last = log.sets[log.sets.length - 1]
+          const newSet: DraftSet = {
+            id: createId('set'),
+            weight: last ? last.weight : 0,
+            reps: last ? last.reps : 10,
+            targetWeight: last ? last.targetWeight : 0,
+            targetReps: last ? last.targetReps : 10,
+            targetRepsMin: last?.targetRepsMin ?? last?.targetReps ?? 8,
+            prevWeight: null,
+            prevReps: null,
+            isWarmup: false,
+            failure: false,
+            completedAt: null,
+            workSeconds: null,
+            restBeforeSeconds: null,
+          }
+          const updatedLogs = {
+            ...state.activeDraft.logs,
+            [exerciseId]: { ...log, sets: [...log.sets, newSet] },
+          }
+          const activeExercises = state.exercises.filter(
+            (e) => e.section === state.activeDraft.section && e.active,
+          )
+          const exIdx = activeExercises.findIndex((e) => e.id === exerciseId)
+          const resumeDone = state.sessionPhase === 'done' && exIdx >= 0
+          return {
+            undoStack: pushSnapshot(state.undoStack, snapshot),
+            ...(resumeDone
+              ? {
+                  sessionPhase: 'working' as SessionPhase,
+                  cursor: { exerciseIdx: exIdx, setIdx: log.sets.length },
+                }
+              : {}),
+            activeDraft: {
+              ...state.activeDraft,
+              ...(resumeDone ? { phaseStartedAt: Date.now() } : {}),
+              logs: updatedLogs,
+            },
+          }
+        })
+      },
+
+      removeLastUncompletedSet: (exerciseId) => {
+        set((state) => {
+          const log = state.activeDraft.logs[exerciseId]
+          if (!log || log.sets.length <= 1) return state
+          let removeIdx = -1
+          for (let i = log.sets.length - 1; i >= 0; i -= 1) {
+            if (log.sets[i].completedAt === null) {
+              removeIdx = i
+              break
+            }
+          }
+          if (removeIdx < 0) return state
+          const snapshot: UndoSnapshot = {
+            activeDraft: cloneDraft(state.activeDraft),
+            sessionPhase: state.sessionPhase,
+            cursor: { ...state.cursor },
+            restTimer: state.restTimer ? { ...state.restTimer } : null,
+          }
+          const nextSets = log.sets.filter((_, idx) => idx !== removeIdx)
+          const updatedLogs = {
+            ...state.activeDraft.logs,
+            [exerciseId]: { ...log, sets: nextSets },
+          }
+          const activeExercises = state.exercises.filter(
+            (e) => e.section === state.activeDraft.section && e.active,
+          )
+          const exIdx = activeExercises.findIndex((e) => e.id === exerciseId)
+          let nextCursor: StepCursor | null = state.cursor
+          let nextPhase = state.sessionPhase
+          if (exIdx === state.cursor.exerciseIdx && state.cursor.setIdx >= nextSets.length) {
+            nextCursor = findNextUncompletedCursor(activeExercises, updatedLogs, exIdx, 0)
+            if (!nextCursor && state.sessionPhase !== 'idle') {
+              nextPhase = 'done'
+            }
+          }
+          return {
+            undoStack: pushSnapshot(state.undoStack, snapshot),
+            sessionPhase: nextPhase,
+            cursor: nextCursor ?? { exerciseIdx: 0, setIdx: 0 },
+            activeDraft: {
+              ...state.activeDraft,
+              logs: updatedLogs,
+            },
+          }
+        })
+      },
+
+      skipRemainingSetsOfCurrentExercise: () => {
+        const state = get()
+        const section = state.activeDraft.section
+        const activeExercises = state.exercises.filter((e) => e.section === section && e.active)
+        const currentEx = activeExercises[state.cursor.exerciseIdx]
+        if (!currentEx) return
+        const log = state.activeDraft.logs[currentEx.id]
+        if (!log) return
+
+        const snapshot: UndoSnapshot = {
+          activeDraft: cloneDraft(state.activeDraft),
+          sessionPhase: state.sessionPhase,
+          cursor: { ...state.cursor },
+          restTimer: state.restTimer ? { ...state.restTimer } : null,
+        }
+
+        const updatedSets = log.sets.map((s) =>
+          s.completedAt === null ? { ...s, skipped: true } : s,
+        )
+        const updatedLogs: Record<string, DraftExerciseLog> = {
+          ...state.activeDraft.logs,
+          [currentEx.id]: { ...log, sets: updatedSets },
+        }
+
+        const nextCursor = findNextUncompletedCursor(
+          activeExercises,
+          updatedLogs,
+          state.cursor.exerciseIdx + 1,
+          0,
+        )
+        const now = Date.now()
+        set({
+          undoStack: pushSnapshot(state.undoStack, snapshot),
+          sessionPhase: nextCursor ? 'working' : 'done',
+          cursor: nextCursor ?? { exerciseIdx: 0, setIdx: 0 },
+          restTimer: null,
+          activeDraft: {
+            ...state.activeDraft,
+            phaseStartedAt: nextCursor ? now : null,
+            logs: updatedLogs,
+          },
+        })
+      },
+
+      toggleExerciseActive: (exerciseId) => {
+        const state = get()
+        const target = state.exercises.find((e) => e.id === exerciseId)
+        if (!target) return
+        const nextActive = !target.active
+        const nextExercises = state.exercises.map((ex) =>
+          ex.id === exerciseId
+            ? { ...ex, active: nextActive, ...(nextActive ? { archived: false } : {}) }
+            : ex,
+        )
+        const upPlan = buildDdpSessionPlan(nextExercises, 'up')
+        const legsPlan = buildDdpSessionPlan(nextExercises, 'legs')
+        const section = state.activeDraft.section
+        const activePlan = section === 'legs' ? legsPlan : upPlan
+        clearInFlightCoachTracking()
+        set({
+          exercises: nextExercises,
+          coachPlans: { up: upPlan, legs: legsPlan },
+          activeDraft: {
+            ...state.activeDraft,
+            logs: buildDraftLogsForSection(
+              nextExercises,
+              section,
+              activePlan,
+              state.activeDraft.logs,
+            ),
+          },
+        })
+        if (sanitizeApiKey(state.settings.apiKey)) {
+          void get().ensureSessionPlansGenerated(section)
+        }
+      },
+
+      exportBackupJson: (options = {}) => {
+        const state = get()
+        const slice = state.simulation
+          ? { ...state.simulation, settings: state.settings }
+          : pickPersisted(state)
+        return buildBackup(slice as unknown as Record<string, unknown>, options)
+      },
+
+      restoreFromBackupJson: (jsonText) => {
+        const today = todayISODate()
+        const restored = parseBackup(jsonText, today)
+        storeEpoch += 1
+        clearInFlightCoachTracking()
+        const current = get()
+        const restoredExercises = (restored.exercises as Exercise[]) ?? current.exercises
+        const restoredPreamble =
+          typeof restored.preamble === 'string' ? restored.preamble : current.preamble
+        const upPlan = buildDdpSessionPlan(restoredExercises, 'up')
+        const legsPlan = buildDdpSessionPlan(restoredExercises, 'legs')
+        const { recommended } = getRecommendedSection(restoredExercises)
+        const restoredSettings = (restored.settings ?? {}) as Partial<AppSettings>
+        const nextApiKey = sanitizeApiKey(restoredSettings.apiKey || current.settings.apiKey)
+        set({
+          preamble: restoredPreamble,
+          exercises: restoredExercises,
+          completedSessions: Array.isArray(restored.completedSessions)
+            ? (restored.completedSessions as CompletedSessionRecord[])
+            : [],
+          aiStats: null,
+          coachPlans: { up: upPlan, legs: legsPlan },
+          sessionPhase: 'idle',
+          cursor: { exerciseIdx: 0, setIdx: 0 },
+          restTimer: null,
+          undoStack: [],
+          simulation: null,
+          aiError: null,
+          aiStatsError: null,
+          settings: {
+            ...current.settings,
+            ...restoredSettings,
+            apiKey: nextApiKey,
+            geminiModel: DEFAULT_GEMINI_MODEL,
+          },
+          activeDraft: {
+            section: recommended,
+            date: today,
+            startedAt: null,
+            phaseStartedAt: null,
+            pendingRestSeconds: null,
+            logs: buildDraftLogsForSection(
+              restoredExercises,
+              recommended,
+              recommended === 'legs' ? legsPlan : upPlan,
+            ),
+          },
+        })
+        if (nextApiKey) {
+          void get().ensureSessionPlansGenerated(recommended)
+        }
+      },
+
       getExercisesWithLiveProgress: () => {
         const state = get()
         const { section, date, startedAt, logs } = state.activeDraft
@@ -785,6 +1077,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             reps: s.reps,
             targetWeight: s.targetWeight,
             targetReps: s.targetReps,
+            ...(s.note?.trim() ? { note: s.note.trim() } : {}),
             ...(s.isWarmup ? { isWarmup: true } : {}),
             ...(s.failure ? { failure: true } : {}),
             ...(typeof s.workSeconds === 'number' ? { workSeconds: s.workSeconds } : {}),
@@ -793,12 +1086,15 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
               : {}),
           }))
 
-          const restValues = doneSets
+          // Seuls les repos entre séries de travail d'un même exercice entrent dans `(repos : …)` :
+          // exclut la transition depuis l'exercice précédent (idx === 0) et le repos post-échauffement.
+          const intraWorkRests = doneSets
+            .filter((s, idx) => idx > 0 && !s.isWarmup && !doneSets[idx - 1].isWarmup)
             .map((s) => s.restBeforeSeconds)
             .filter((v): v is number => typeof v === 'number' && v > 0)
           const avgRest =
-            restValues.length > 0
-              ? Math.round(restValues.reduce((a, b) => a + b, 0) / restValues.length)
+            intraWorkRests.length > 0
+              ? Math.round(intraWorkRests.reduce((a, b) => a + b, 0) / intraWorkRests.length)
               : (state.coachPlans[section]?.exercises[ex.id]?.restSeconds ??
                 ex.defaultRestSeconds)
 
@@ -881,6 +1177,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
               reps: s.reps,
               targetWeight: s.targetWeight,
               targetReps: s.targetReps,
+              ...(s.note?.trim() ? { note: s.note.trim() } : {}),
               ...(s.isWarmup ? { isWarmup: true } : {}),
               ...(s.failure ? { failure: true } : {}),
               ...(typeof s.workSeconds === 'number' ? { workSeconds: s.workSeconds } : {}),
@@ -904,9 +1201,10 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
 
         if (savedExercises === 0) return null
 
+        const minChrono = Math.max(1, totalWorkSeconds + totalRestSeconds)
         const totalDurationSeconds = startedAt
-          ? Math.max(1, Math.round((endedAt - startedAt) / 1000))
-          : Math.max(1, totalWorkSeconds + totalRestSeconds)
+          ? Math.max(minChrono, Math.round((endedAt - startedAt) / 1000))
+          : minChrono
 
         const sessionRecord: CompletedSessionRecord = {
           id: createId('session'),
@@ -1473,7 +1771,8 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             apiKey: sanitizeApiKey(rawKey),
             geminiModel: modelChosen ? savedModel : DEFAULT_GEMINI_MODEL,
             geminiModelChosen: modelChosen,
-            soundEnabled: false,
+            soundEnabled: Boolean(persisted.settings?.soundEnabled ?? false),
+            vibrationEnabled: Boolean(persisted.settings?.vibrationEnabled ?? false),
           },
         }
       },

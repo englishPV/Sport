@@ -6,12 +6,13 @@
  * calculables (base DDP, tendance, charges disponibles) sont calculés ici,
  * et toute charge hors limites revient à la base DDP.
  */
-import { computeExerciseDdpPlan } from './ddp'
+import { computeExerciseDdpPlan, isPendingObjective } from './ddp'
 import { buildEnrichedChronology } from './statsEngine'
 import {
   SECTION_LABELS,
   formatIsoToFr,
   formatNumberFr,
+  todayISODate,
   type AppSettings,
   type Exercise,
   type ExerciseEntry,
@@ -23,8 +24,10 @@ export const COACH_HISTORY_DEPTH = 3
 /** Séances résumées (charges + reps) au-delà du détail : les cycles de 12-15 reps se voient sur 6 séances. */
 export const COACH_HISTORY_SUMMARY_DEPTH = 6
 
-function realEntries(ex: Exercise): ExerciseEntry[] {
-  return ex.entries.filter((e) => !e.skipOnly && e.sets.length > 0)
+function realEntries(ex: Exercise, todayIso = todayISODate()): ExerciseEntry[] {
+  return ex.entries.filter(
+    (e) => !e.skipOnly && e.sets.length > 0 && !isPendingObjective(e, todayIso),
+  )
 }
 
 /** « 10 kg × 12 | 22 kg × 12 | 20 kg × 12, 9 » — la forme que l'athlète lit dans son carnet. */
@@ -42,15 +45,23 @@ function setsOutline(entry: ExerciseEntry, unit: Exercise['unit']): string {
 
 /**
  * Ce que le carnet ne dit pas toujours mais qui change la décision : la marge à l'échec
- * (« j'aurais pu faire 13 »), l'échec, le repos réel, les reps perdues entre séries.
+ * (« j'aurais pu faire 13 »), l'échec, le repos réel, les reps perdues entre séries,
+ * ou un ajustement sur l'échauffement (« pas trouvé 10 »).
  */
 function readSetSignals(entry: ExerciseEntry): string {
+  const warmups = entry.sets.filter((set) => set.isWarmup)
   const work = entry.sets.filter((set) => !set.isWarmup)
   if (work.length === 0) return ''
   const signals: string[] = []
   const drop = work[0].reps - work[work.length - 1].reps
   if (drop >= 3) signals.push(`décrochage de ${drop} reps entre la 1re et la dernière série`)
   if (work.some((set) => set.failure)) signals.push('échec noté')
+  const warmupNotes = warmups
+    .map((set) => (set.note ?? '').trim())
+    .filter(Boolean)
+  if (warmupNotes.length > 0) {
+    signals.push(`échauffement : « ${warmupNotes.join(' · ')} »`)
+  }
   const notes = work
     .map((set, idx) => ({ idx: idx + 1, note: (set.note ?? '').trim() }))
     .filter((item) => item.note)
@@ -237,17 +248,25 @@ export function guardExercisePlan(ex: Exercise, ai: ExercisePlan, ddp: ExerciseP
   const fallback: GuardResult = { plan: ddp, corrected: true }
 
   if (aiWork.length === 0) return fallback
-  if (ddpWork.length > 0 && Math.abs(aiWork.length - ddpWork.length) > 1) return fallback
-  // Même nombre de séries de travail qu'à l'habitude : série manquante reprise de la base DDP, série en trop retirée.
+
+  const recentEntries = realEntries(ex).slice(0, COACH_HISTORY_DEPTH)
+  // Autorise le retour au nombre habituel de séries d'une variante récente (ex. 4 séries sur
+  // Machine assis après un dépannage 2 séries sur Calf debout).
+  const recentSetCounts = new Set(
+    recentEntries
+      .map((e) => e.sets.filter((s) => !s.isWarmup).length)
+      .filter((n) => n > 0),
+  )
+
   let countFixed = false
-  if (ddpWork.length > 0 && aiWork.length !== ddpWork.length) {
+  if (ddpWork.length > 0 && aiWork.length !== ddpWork.length && !recentSetCounts.has(aiWork.length)) {
+    if (Math.abs(aiWork.length - ddpWork.length) > 1) return fallback
     countFixed = true
     if (aiWork.length > ddpWork.length) aiWork.length = ddpWork.length
     else aiWork.push(...ddpWork.slice(aiWork.length))
   }
 
-  const recentWork = realEntries(ex)
-    .slice(0, COACH_HISTORY_DEPTH)
+  const recentWork = recentEntries
     .flatMap((e) => e.sets)
     .filter((s) => !s.isWarmup && s.weight > 0)
     .map((s) => s.weight)
@@ -259,7 +278,7 @@ export function guardExercisePlan(ex: Exercise, ai: ExercisePlan, ddp: ExerciseP
     if (aiWork.some((s) => s.weight > ceiling + 1e-6 || s.weight < floor - 1e-6)) return fallback
   }
 
-  const ddpWarmups = ddp.sets.filter((s) => s.isWarmup)
+  const ddpWarmups = ddp.sets.filter((s) => !s.isWarmup ? false : true)
   const aiWarmups = ai.sets.filter((s) => s.isWarmup)
   const lightestWork = Math.min(...aiWork.map((s) => s.weight))
   const warmupsBroken =

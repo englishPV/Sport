@@ -5,15 +5,18 @@ import {
   ChevronDown,
   Clock,
   Flame,
+  ListChecks,
+  Minus,
   Moon,
+  Plus,
   RotateCcw,
   SkipForward,
   Sparkles,
   Sun,
 } from 'lucide-react'
 import { HistoryValueInput } from '../components/HistoryValueInput'
-import { Popover, Toast, useDismiss } from '../components/motion'
-import { getRecommendedSection } from '../core/ddp'
+import { Collapse, Popover, Toast, useDismiss } from '../components/motion'
+import { formatExercisePlanInline, getRecommendedSection } from '../core/ddp'
 import { isGeminiPlanFresh } from '../core/gemini'
 import type { SectionId } from '../core/types'
 import { useNow } from '../hooks/useNow'
@@ -58,16 +61,19 @@ export type ValuePerfState =
 export function computePerfState(params: {
   value: number
   target: number
+  targetMin?: number
   prev: number | null
   step: number
 }): ValuePerfState {
-  const { value, target, prev, step } = params
+  const { value, target, targetMin, prev, step } = params
   const eps = 0.01
+  const effectiveMin =
+    typeof targetMin === 'number' && targetMin <= target ? targetMin : target
 
   if (value > target + eps) {
     return 'above'
   }
-  if (Math.abs(value - target) <= eps) {
+  if (value >= effectiveMin - eps && value <= target + eps) {
     return 'target'
   }
   // En dessous de l'objectif mais égal à la dernière séance -> repère ambre
@@ -76,7 +82,7 @@ export function computePerfState(params: {
   }
   const safeStep = Math.max(0.5, step)
   const baseline =
-    prev !== null && prev < target - eps ? prev : target
+    prev !== null && prev < effectiveMin - eps ? prev : effectiveMin
   const stepsDown = Math.max(1, Math.ceil((baseline - value - eps) / safeStep))
   if (stepsDown === 1) return 'below-1'
   if (stepsDown === 2) return 'below-2'
@@ -168,7 +174,12 @@ export function WorkoutView() {
   const adjustWorkoutChrono = useWorkoutStore((s) => s.adjustWorkoutChrono)
   const setWorkoutChronoSeconds = useWorkoutStore((s) => s.setWorkoutChronoSeconds)
   const updateDraftSet = useWorkoutStore((s) => s.updateDraftSet)
-  const updateDraftNote = useWorkoutStore((s) => s.updateDraftNote)
+  const addSetToExercise = useWorkoutStore((s) => s.addSetToExercise)
+  const removeLastUncompletedSet = useWorkoutStore((s) => s.removeLastUncompletedSet)
+  const skipRemainingSetsOfCurrentExercise = useWorkoutStore(
+    (s) => s.skipRemainingSetsOfCurrentExercise,
+  )
+  const toggleExerciseActive = useWorkoutStore((s) => s.toggleExerciseActive)
   const saveCompletedWorkout = useWorkoutStore((s) => s.saveCompletedWorkout)
   const discardActiveWorkout = useWorkoutStore((s) => s.discardActiveWorkout)
   const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
@@ -177,6 +188,7 @@ export function WorkoutView() {
 
   const [showExercisePicker, setShowExercisePicker] = useState(false)
   const [showChronoEditor, setShowChronoEditor] = useState(false)
+  const [showSessionPreview, setShowSessionPreview] = useState(false)
   const [customChronoText, setCustomChronoText] = useState('')
   const savedToast = useWorkoutStore((s) => s.lastToast)
   const setSavedToast = useWorkoutStore((s) => s.setLastToast)
@@ -266,8 +278,14 @@ export function WorkoutView() {
   }, 0)
 
   const totalSetsCount = activeExercises.reduce((acc, ex) => {
-    return acc + (activeDraft.logs[ex.id]?.sets.length ?? 0)
+    const sets = activeDraft.logs[ex.id]?.sets ?? []
+    return acc + sets.filter((s) => !s.skipped).length
   }, 0)
+
+  const pausedSectionExercises = exercises.filter(
+    (e) => e.section === section && !e.active,
+  )
+  const currentPlan = coachPlans[section]
 
   const toggleDarkMode = () => {
     updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })
@@ -426,6 +444,100 @@ export function WorkoutView() {
             >
               Effacer l&apos;essai
             </button>
+          </div>
+        )}
+
+        {/* Aperçu dépliable du programme et des consignes du coach sans démarrer le chrono */}
+        {activeExercises.length > 0 && (
+          <div className="mt-6 w-full max-w-md text-left">
+            <div className="text-center">
+              <button
+                type="button"
+                aria-expanded={showSessionPreview}
+                onClick={() => setShowSessionPreview((v) => !v)}
+                className="tap inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-200/60 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              >
+                <ListChecks className="h-3.5 w-3.5" />
+                Aperçu de la séance ({activeExercises.length} exos)
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform duration-300 ease-smooth ${
+                    showSessionPreview ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+            </div>
+
+            <Collapse open={showSessionPreview} className="mt-2">
+              <div className="space-y-2.5 rounded-2xl border border-slate-200/80 bg-white/90 p-3.5 shadow-sm dark:border-slate-800 dark:bg-slate-900/90">
+                {currentPlan?.summaryLines && currentPlan.summaryLines.length > 0 && (
+                  <ul className="space-y-1 border-b border-slate-100 pb-2.5 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-300">
+                    {currentPlan.summaryLines.map((line, i) => (
+                      <li key={i} className="flex items-start gap-1.5">
+                        <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-indigo-500" />
+                        <span>{line}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <div className="space-y-2">
+                  {activeExercises.map((ex, idx) => {
+                    const exPlan = currentPlan?.exercises[ex.id]
+                    return (
+                      <div
+                        key={ex.id}
+                        className="rounded-xl bg-slate-50/90 px-3 py-2 text-xs dark:bg-slate-800/60"
+                      >
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="font-bold text-slate-800 dark:text-slate-100">
+                            {idx + 1}. {ex.name}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => toggleExerciseActive(ex.id)}
+                            title="Mettre cet exercice en pause"
+                            className="shrink-0 text-[11px] font-medium text-slate-400 hover:text-rose-500"
+                          >
+                            Pause
+                          </button>
+                        </div>
+                        {exPlan && (
+                          <p className="mt-0.5 font-mono text-[11px] text-indigo-600 dark:text-indigo-300">
+                            {formatExercisePlanInline(exPlan, ex.unit)}
+                          </p>
+                        )}
+                        {exPlan?.tip && (
+                          <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                            {exPlan.tip}
+                          </p>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {pausedSectionExercises.length > 0 && (
+                  <details className="border-t border-slate-100 pt-2 text-xs dark:border-slate-800">
+                    <summary className="cursor-pointer font-semibold text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
+                      Exercices en pause ({pausedSectionExercises.length})
+                    </summary>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {pausedSectionExercises.map((ex) => (
+                        <button
+                          key={ex.id}
+                          type="button"
+                          onClick={() => toggleExerciseActive(ex.id)}
+                          className="tap inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                        >
+                          <Plus className="h-3 w-3" />
+                          {ex.name}
+                        </button>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            </Collapse>
           </div>
         )}
       </div>
@@ -747,6 +859,7 @@ export function WorkoutView() {
   const repsPerf = computePerfState({
     value: currentSet.reps,
     target: currentSet.targetReps,
+    targetMin: currentSet.targetRepsMin,
     prev: sameWeightAsPrev ? currentSet.prevReps : null,
     step: 1,
   })
@@ -799,7 +912,40 @@ export function WorkoutView() {
               )
             })}
           </div>
-          <div className="mt-1 space-y-1 border-t border-slate-100 pt-1 dark:border-slate-800">
+          <div className="mt-1 space-y-1 border-t border-slate-100 pt-1.5 dark:border-slate-800">
+            <div className="grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                onClick={() => addSetToExercise(currentEx.id)}
+                className="inline-flex items-center justify-center gap-1 rounded-xl bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Ajouter série
+              </button>
+              <button
+                type="button"
+                disabled={
+                  sets.length <= 1 || sets.every((s) => s.completedAt !== null)
+                }
+                onClick={() => removeLastUncompletedSet(currentEx.id)}
+                className="inline-flex items-center justify-center gap-1 rounded-xl bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Minus className="h-3.5 w-3.5" />
+                Retirer série
+              </button>
+            </div>
+            {sets.some((s) => s.completedAt === null && !s.skipped) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExercisePicker(false)
+                  skipRemainingSetsOfCurrentExercise()
+                }}
+                className="w-full rounded-xl px-3 py-1.5 text-center text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-300"
+              >
+                Passer la fin de cet exercice
+              </button>
+            )}
             {validatedCount > 0 && (
               <button
                 type="button"
@@ -968,12 +1114,14 @@ export function WorkoutView() {
           </div>
         </div>
 
-        {/* Ligne épurée : Commentaire + Échec discret */}
+        {/* Ligne épurée : Commentaire de la série en cours + Échec discret */}
         <div className="mt-5 flex items-center gap-2">
           <input
             type="text"
-            value={currentLog?.note ?? ''}
-            onChange={(e) => updateDraftNote(currentEx.id, e.target.value)}
+            value={currentSet.note ?? ''}
+            onChange={(e) =>
+              updateDraftSet(currentEx.id, currentSet.id, { note: e.target.value })
+            }
             placeholder="Commentaire"
             className="w-full rounded-xl border border-slate-200/90 bg-white/90 px-3.5 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 dark:border-slate-800 dark:bg-slate-900/90 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:ring-indigo-400/10"
           />

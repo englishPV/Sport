@@ -113,6 +113,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const profileWeightKg = useWorkoutStore((s) => s.settings.profileWeightKg)
   const deleteHistoryEntry = useWorkoutStore((s) => s.deleteHistoryEntry)
   const deleteCompletedSession = useWorkoutStore((s) => s.deleteCompletedSession)
+  const toggleExerciseActive = useWorkoutStore((s) => s.toggleExerciseActive)
 
   const exercises = getExercisesWithLiveProgress()
 
@@ -120,6 +121,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const [expandedExId, setExpandedExId] = useState<string | null>(null)
   const [showHistoryExId, setShowHistoryExId] = useState<string | null>(null)
   const [showRecentTimings, setShowRecentTimings] = useState(false)
+  const [showInactiveExercises, setShowInactiveExercises] = useState(false)
   const [metric, setMetric] = useState<ChartMetric>('maxWeight')
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
 
@@ -136,6 +138,11 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
 
   const sectionExercises = useMemo(
     () => exercises.filter((e) => e.section === section && e.active),
+    [exercises, section],
+  )
+
+  const inactiveSectionExercises = useMemo(
+    () => exercises.filter((e) => e.section === section && !e.active),
     [exercises, section],
   )
 
@@ -659,6 +666,120 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
           )
         })}
       </div>
+
+      {/* Exercices secondaires / archivés dépliables à la demande */}
+      {inactiveSectionExercises.length > 0 && (
+        <div className="pt-2">
+          <button
+            type="button"
+            aria-expanded={showInactiveExercises}
+            onClick={() => setShowInactiveExercises((v) => !v)}
+            className="tap flex w-full items-center justify-between rounded-2xl border border-dashed border-slate-200 px-4 py-3 text-xs font-semibold text-slate-500 hover:border-slate-300 hover:text-slate-800 dark:border-slate-800 dark:text-slate-400 dark:hover:border-slate-700 dark:hover:text-slate-200"
+          >
+            <span>
+              Exercices en pause ou archivés ({inactiveSectionExercises.length})
+            </span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform duration-300 ease-smooth ${
+                showInactiveExercises ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+
+          <Collapse open={showInactiveExercises} className="mt-2">
+            <div className="space-y-2">
+              {inactiveSectionExercises.map((ex) => {
+                const isOpen = expandedExId === ex.id
+                const showHistory = showHistoryExId === ex.id
+                const latestSummary = getLatestBestSetSummary(ex)
+                const realSessionsCount = ex.entries.filter(
+                  (e) => !e.skipOnly && e.sets.length > 0,
+                ).length
+                const chronoDesc = getChronoDesc(ex, isOpen && showHistory)
+
+                return (
+                  <div
+                    key={ex.id}
+                    className="overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 dark:border-slate-800 dark:bg-slate-900/80"
+                  >
+                    <div className="flex items-center justify-between gap-2 px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExpandedExId(isOpen ? null : ex.id)
+                          setShowHistoryExId(null)
+                        }}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <p className="truncate text-sm font-semibold text-slate-700 dark:text-slate-200">
+                          {ex.name}
+                        </p>
+                        <p className="mt-0.5 text-xs text-slate-400">
+                          {realSessionsCount > 0
+                            ? `${realSessionsCount} séance${realSessionsCount > 1 ? 's' : ''} · Dernière : ${latestSummary}`
+                            : 'Aucune séance enregistrée'}
+                        </p>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => toggleExerciseActive(ex.id)}
+                        className="press shrink-0 rounded-xl border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-950/40 dark:text-indigo-300"
+                      >
+                        Réactiver
+                      </button>
+                    </div>
+
+                    <Collapse open={isOpen}>
+                      <div className="space-y-3 border-t border-slate-100 px-4 pb-4 pt-3 dark:border-slate-800">
+                        <ProgressionChart exercise={ex} metric={metric} />
+                        {realSessionsCount > 0 && (
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setShowHistoryExId(showHistory ? null : ex.id)
+                              }
+                              className="tap text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400"
+                            >
+                              {showHistory
+                                ? 'Masquer les séances'
+                                : `Voir les ${realSessionsCount} séances`}
+                            </button>
+                            <Collapse open={showHistory} className="mt-2">
+                              <div className="max-h-60 space-y-1.5 overflow-y-auto pr-1">
+                                {chronoDesc.map((item) => (
+                                  <div
+                                    key={item.entry.id}
+                                    className="rounded-xl bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800/60"
+                                  >
+                                    <span className="font-bold text-slate-700 dark:text-slate-200">
+                                      {item.displayDate}
+                                    </span>{' '}
+                                    ·{' '}
+                                    <span className="font-mono text-slate-600 dark:text-slate-300">
+                                      {item.setsDisplay}
+                                    </span>
+                                    {item.entry.note && (
+                                      <p className="mt-0.5 italic text-slate-500 dark:text-slate-400">
+                                        {item.entry.note}
+                                      </p>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </Collapse>
+                          </div>
+                        )}
+                      </div>
+                    </Collapse>
+                  </div>
+                )
+              })}
+            </div>
+          </Collapse>
+        </div>
+      )}
     </div>
   )
 }

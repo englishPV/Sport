@@ -72,7 +72,11 @@ function formatSecondsFr(totalSeconds: number | null | undefined): string {
 }
 
 function formatWeight(ex: Exercise, weight: number): string {
-  if (ex.unit === 'bodyweight' && weight === 0) return 'poids de corps'
+  if (weight === 0) {
+    return ex.unit === 'bodyweight' || /poids|abdos|crunch|traction|pompe|dips/i.test(ex.name)
+      ? 'poids de corps'
+      : 'sans charge'
+  }
   return `${formatNumberFr(weight)} kg`
 }
 
@@ -91,9 +95,16 @@ function summarizeExercise(ex: Exercise): ExerciseSummary {
   const previous = performed.length > 1 ? performed[performed.length - 2] : null
 
   const withWeight = performed.filter((c) => c.hasValidWeight)
+  const primaryPool = withWeight.filter((c) => c.isPrimaryVariant)
+  const bestPool = primaryPool.length > 0 ? primaryPool : withWeight
   const best =
-    withWeight.length > 0
-      ? withWeight.reduce((acc, cur) => (cur.topWeight >= acc.topWeight ? cur : acc))
+    bestPool.length > 0
+      ? bestPool.reduce((acc, cur) =>
+          cur.topWeight > acc.topWeight ||
+          (cur.topWeight === acc.topWeight && cur.topSetRepsAtPeak >= acc.topSetRepsAtPeak)
+            ? cur
+            : acc,
+        )
       : null
 
   const totalVolume = performed.reduce((sum, c) => sum + c.volumeKg, 0)
@@ -373,12 +384,17 @@ export function buildStatsReport({
           ex.unit === 'kg' && best.topWeight > 0
             ? ` (1RM estimé ${formatNumberFr(Math.round(best.bestE1rm * 10) / 10)} kg)`
             : ''
+        const variantHint =
+          variants.length > 1 && best.variant !== 'Standard' ? ` [${best.variant}]` : ''
         lines.push(
-          `- Record : ${formatWeight(ex, best.topWeight)} × ${formatNumberFr(best.topSetRepsAtPeak)}${e1rm} ${datePhrase(best.displayDate)}.`,
+          `- Record : ${formatWeight(ex, best.topWeight)} × ${formatNumberFr(best.topSetRepsAtPeak)}${e1rm} ${datePhrase(best.displayDate)}${variantHint}.`,
         )
       }
 
-      const recentHistory = summary.performed.slice(-5).reverse()
+      const recentHistory = summary.performed
+        .filter((c) => c.hasValidWeight)
+        .slice(-5)
+        .reverse()
       if (recentHistory.length > 1) {
         const historyLine = recentHistory
           .map(
@@ -466,7 +482,8 @@ export function buildStatsReport({
     if (
       last3.length >= 3 &&
       last3.every((c) => Math.abs(c.topWeight - last3[0].topWeight) <= 0.01) &&
-      latest.topSetRepsAtPeak <= last3[0].topSetRepsAtPeak
+      latest.topSetRepsAtPeak <= last3[0].topSetRepsAtPeak &&
+      latest.topSetRepsAtPeak <= last3[last3.length - 2].topSetRepsAtPeak
     ) {
       stagnations.push(
         `Stagnation : ${ex.name} — ${last3.length} séances à ${formatWeight(

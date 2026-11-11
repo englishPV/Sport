@@ -93,10 +93,13 @@ export interface DraftSet {
   reps: number
   targetWeight: number
   targetReps: number
+  targetRepsMin?: number
   prevWeight: number | null
   prevReps: number | null
   isWarmup: boolean
   failure: boolean
+  note?: string
+  skipped?: boolean
   completedAt: number | null
   workSeconds: number | null
   restBeforeSeconds: number | null

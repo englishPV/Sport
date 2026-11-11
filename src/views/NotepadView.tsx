@@ -1,17 +1,32 @@
 import { useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Check, Copy, Download, RotateCcw, Sparkles, Upload, X } from 'lucide-react'
+import {
+  ArrowLeft,
+  Check,
+  ClipboardPaste,
+  Copy,
+  Download,
+  RotateCcw,
+  Sparkles,
+  Target,
+  Upload,
+  X,
+} from 'lucide-react'
 import { copyText } from '../core/clipboard'
 import { exportNotepad } from '../core/parser'
+import { todayISODate } from '../core/types'
 import { useWorkoutStore } from '../store/useWorkoutStore'
 
 export function NotepadView({ onBack }: { onBack: () => void }) {
   const preamble = useWorkoutStore((s) => s.preamble)
   const exercises = useWorkoutStore((s) => s.exercises)
   const activeDraft = useWorkoutStore((s) => s.activeDraft)
+  const coachPlans = useWorkoutStore((s) => s.coachPlans)
   const getExercisesWithLiveProgress = useWorkoutStore((s) => s.getExercisesWithLiveProgress)
   const importNotepadSmart = useWorkoutStore((s) => s.importNotepadSmart)
   const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
   const resetToDefaultNotepad = useWorkoutStore((s) => s.resetToDefaultNotepad)
+
+  const [includePlanObjectives, setIncludePlanObjectives] = useState(false)
 
   const liveExercises = useMemo(
     () => getExercisesWithLiveProgress(),
@@ -27,8 +42,15 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
   }, [activeDraft])
 
   const exportedText = useMemo(
-    () => exportNotepad({ preamble, exercises: liveExercises }),
-    [preamble, liveExercises],
+    () =>
+      exportNotepad({
+        preamble,
+        exercises: liveExercises,
+        plan: includePlanObjectives ? coachPlans[activeDraft.section] : null,
+        planDateIso: includePlanObjectives ? todayISODate() : undefined,
+        includeObjectives: includePlanObjectives,
+      }),
+    [preamble, liveExercises, includePlanObjectives, coachPlans, activeDraft.section],
   )
 
   const [editorText, setEditorText] = useState<string | null>(null)
@@ -36,6 +58,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
   const [feedback, setFeedback] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const displayedText = editorText ?? exportedText
   const isDirty = editorText !== null && editorText !== exportedText
@@ -209,6 +232,48 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
             <Upload className="h-3.5 w-3.5" />
             Fichier
           </button>
+
+          <button
+            type="button"
+            disabled={isImporting}
+            onClick={async () => {
+              try {
+                if (navigator.clipboard?.readText) {
+                  const pasted = await navigator.clipboard.readText()
+                  if (pasted.trim()) {
+                    setEditorText(pasted)
+                    await runSmartImport(pasted, { preserveCustomPreamble: true })
+                    return
+                  }
+                }
+              } catch {
+                // Permission presse-papier refusée : vide la zone et donne le focus pour coller en 1 geste
+              }
+              setEditorText('')
+              textareaRef.current?.focus()
+              flash('Zone vidée : colle ton carnet puis clique sur Enregistrer')
+            }}
+            title="Remplacer tout le contenu par ton presse-papier"
+            className="press inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-800"
+          >
+            <ClipboardPaste className="h-3.5 w-3.5" />
+            Remplacer
+          </button>
+
+          <button
+            type="button"
+            aria-pressed={includePlanObjectives}
+            onClick={() => setIncludePlanObjectives((v) => !v)}
+            title="Inclure les lignes (Objectif) de la séance du jour dans le .txt exporté"
+            className={`press inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
+              includePlanObjectives
+                ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-950/40 dark:text-indigo-300'
+                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-700'
+            }`}
+          >
+            <Target className="h-3.5 w-3.5" />
+            (Objectif)
+          </button>
         </div>
 
         <button
@@ -252,6 +317,7 @@ export function NotepadView({ onBack }: { onBack: () => void }) {
       )}
 
       <textarea
+        ref={textareaRef}
         value={displayedText}
         onChange={(e) => {
           const val = e.target.value
