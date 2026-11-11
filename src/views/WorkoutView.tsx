@@ -424,7 +424,7 @@ export function WorkoutView() {
             ) : aiError && hasApiKey && !currentAlreadyGenerated ? (
               <button
                 type="button"
-                onClick={() => void ensureSessionPlansGenerated(section)}
+                onClick={() => void ensureSessionPlansGenerated(section, { force: true })}
                 className="tap inline-flex max-w-xs items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-500/15 dark:text-rose-300"
               >
                 <span className="truncate">IA : {aiError}</span>
@@ -839,7 +839,7 @@ export function WorkoutView() {
         ) : aiError && hasApiKey ? (
           <button
             type="button"
-            onClick={() => void ensureSessionPlansGenerated(section)}
+            onClick={() => void ensureSessionPlansGenerated(section, { force: true })}
             className="tap mt-4 inline-flex items-center gap-1.5 rounded-full border border-rose-500/25 bg-rose-500/10 px-3.5 py-1.5 text-xs font-semibold text-rose-600 dark:text-rose-300"
           >
             <Sparkles className="h-3.5 w-3.5" />
