@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft,
   Bell,
@@ -17,11 +17,11 @@ import {
 import {
   DEFAULT_GEMINI_MODEL,
   SUGGESTED_GEMINI_MODELS,
+  geminiCallLabel,
   isSupportedGeminiModel,
   modelLabel,
   detectApiProvider,
   sanitizeApiKey,
-  testGeminiConnection,
   type ConnectionTestResult,
   type GeminiChannel,
 } from '../core/gemini'
@@ -48,6 +48,8 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
   const updateSettings = useWorkoutStore((s) => s.updateSettings)
   const clearApiKey = useWorkoutStore((s) => s.clearApiKey)
   const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
+  const testConnection = useWorkoutStore((s) => s.testConnection)
+  const getAiCallLog = useWorkoutStore((s) => s.getAiCallLog)
   const startSimulation = useWorkoutStore((s) => s.startSimulation)
   const exportBackupJson = useWorkoutStore((s) => s.exportBackupJson)
   const restoreFromBackupJson = useWorkoutStore((s) => s.restoreFromBackupJson)
@@ -59,6 +61,21 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
   const [status, setStatus] = useState<ConnectionTestResult | null>(null)
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [backupMessage, setBackupMessage] = useState<{ ok: boolean; text: string } | null>(null)
+  // Journal des requêtes réellement parties chez Google depuis l'ouverture du site.
+  const [callLog, setCallLog] = useState(() => getAiCallLog())
+
+  // Le compteur reste juste même si une génération se termine pendant qu'on est ici.
+  useEffect(() => {
+    const sync = () => {
+      const next = getAiCallLog()
+      setCallLog((prev) =>
+        prev.length === next.length && prev.at(-1)?.at === next.at(-1)?.at ? prev : next,
+      )
+    }
+    sync()
+    const timer = window.setInterval(sync, 1500)
+    return () => window.clearInterval(timer)
+  }, [getAiCallLog])
 
   const cleanedKey = sanitizeApiKey(settings.apiKey)
   const detectedProvider = cleanedKey ? detectApiProvider(cleanedKey) : null
@@ -71,7 +88,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
     new Set([currentModel, ...(supportedModels.length > 0 ? supportedModels : SUGGESTED_GEMINI_MODELS)]),
   )
 
-  const handleTest = async () => {
+  const handleTest = async (probe = false) => {
     const keyToTest = sanitizeApiKey(settings.apiKey)
     if (keyToTest !== settings.apiKey) {
       updateSettings({ apiKey: keyToTest })
@@ -79,7 +96,9 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
     setTesting(true)
     setStatus(null)
     try {
-      const res = await testGeminiConnection(keyToTest)
+      // Test sans génération par défaut : la clé ne coûte aucune requête du quota.
+      // La génération du plan de séance qui suit (une seule) est déclenchée à part.
+      const res = await testConnection(keyToTest, { probe })
       setStatus(res)
       if (res.models && res.models.length > 0) setAvailableModels(res.models)
       if (res.ok) {
@@ -87,6 +106,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
         void ensureSessionPlansGenerated(activeDraft.section)
       }
     } finally {
+      setCallLog(getAiCallLog())
       setTesting(false)
     }
   }
@@ -232,7 +252,8 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
         </details>
 
         <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-          « Tester la clé » envoie une vraie requête au modèle : elle compte dans les quotas RPM/RPD de Google.
+          « Tester la clé » vérifie la clé et le modèle <strong>sans génération</strong> : 0 requête
+          du quota consommée. Seule la génération d’une séance compte (une par séance ouverte).
         </p>
 
         <div className="grid grid-cols-2 gap-2">
@@ -243,7 +264,7 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
             className="press flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 py-2.5 text-xs font-bold text-white shadow-sm shadow-blue-600/20 hover:bg-blue-700 disabled:opacity-40 disabled:shadow-none"
           >
             {testing ? <Loader2 size={14} className="animate-spin" /> : <Wifi size={14} />}
-            {testing ? 'Test en cours…' : 'Tester la clé'}
+            {testing ? 'Vérification…' : 'Tester la clé'}
           </button>
 
           <button
@@ -276,8 +297,60 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
                 Cette clé n’ouvre aucun modèle 3.8. Vérifiez le projet Google associé à la clé.
               </p>
             ) : null}
+            <button
+              type="button"
+              disabled={testing}
+              onClick={() => void handleTest(true)}
+              className="tap text-[11px] font-semibold text-slate-400 underline decoration-dotted underline-offset-2 hover:text-slate-600 disabled:opacity-40 dark:hover:text-slate-200"
+            >
+              Tester en profondeur (envoie 1 vraie génération, comptée par Google)
+            </button>
           </div>
         ) : null}
+
+        {/* Compteur honnête : les requêtes réellement parties chez Google depuis l'ouverture. */}
+        <details className="rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs dark:border-slate-800">
+          <summary className="flex cursor-pointer items-center justify-between gap-2 font-bold text-slate-600 dark:text-slate-300">
+            <span>Requêtes IA envoyées</span>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 tabular-nums text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+              {callLog.length}
+            </span>
+          </summary>
+          <div className="mt-2 space-y-1.5">
+            {callLog.length === 0 ? (
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                Aucune génération envoyée depuis l’ouverture du site.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {callLog
+                  .slice()
+                  .reverse()
+                  .slice(0, 10)
+                  .map((call, idx) => (
+                    <li
+                      key={`${call.at}-${idx}`}
+                      className="flex items-center justify-between gap-2 text-[11px] font-medium text-slate-600 dark:text-slate-300"
+                    >
+                      <span>{geminiCallLabel(call.tag)}</span>
+                      <span className="tabular-nums text-slate-400">
+                        {new Date(call.at).toLocaleTimeString('fr-FR', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit',
+                        })}
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            )}
+            <p className="text-[11px] text-slate-400 dark:text-slate-500">
+              Ce compteur ne voit que les requêtes envoyées par cette page depuis son ouverture.
+              Google AI Studio peut compter d’autres appels (autres onglets, autres outils) et
+              compte aussi la réflexion du modèle en jetons.
+            </p>
+          </div>
+        </details>
       </section>
 
       <section className={CARD} aria-labelledby="settings-alerts">

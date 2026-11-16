@@ -192,21 +192,34 @@ describe('bouton « Tester la clé »', () => {
     expect(res.models?.filter(isSupportedGeminiModel)).toEqual(['gemini-3.8-flash'])
   })
 
-  it('n’essaie et ne propose aucun autre modèle quand gemini-3.8-flash est saturé', async () => {
+  it('ne consomme AUCUNE requête de génération par défaut : la liste des modèles suffit', async () => {
+    configureGemini({ model: 'gemini-3.8-flash' })
+    const mock = stubFetch((url) =>
+      isList(url) ? modelList(['gemini-3.8-flash']) : fail(503, 'The model is overloaded.'),
+    )
+
+    const res = await testGeminiConnection(AQ_KEY)
+
+    expect(res).toMatchObject({ ok: true, model: 'gemini-3.8-flash' })
+    expect(res.message).toContain('0 requête du quota')
+    expect(generationUrls(mock)).toHaveLength(0)
+  })
+
+  it('en mode sonde, n’essaie et ne propose aucun autre modèle quand gemini-3.8-flash est saturé', async () => {
     configureGemini({ model: 'gemini-3.8-flash' })
     const mock = stubFetch((url) => {
       if (isList(url)) return modelList(['gemini-3.8-flash'])
       return fail(503, 'The model is overloaded.')
     })
 
-    const res = await testGeminiConnection(AQ_KEY)
+    const res = await testGeminiConnection(AQ_KEY, { probe: true })
 
     expect(res).toMatchObject({ ok: false, kind: 'overloaded' })
     expect(res.message).toContain('gemini-3.8-flash')
     expect(generationUrls(mock).every((url) => url.includes('gemini-3.8-flash:generateContent'))).toBe(true)
   })
 
-  it('laisse sa chance au modèle lent : un délai de test plus long qu’un cycle de réflexion HIGH', async () => {
+  it('en mode sonde, laisse sa chance au modèle lent : un délai plus long qu’un cycle de réflexion HIGH', async () => {
     configureGemini({ model: 'gemini-3.8-flash' })
     let calls = 0
     stubFetch((url) => {
@@ -215,10 +228,23 @@ describe('bouton « Tester la clé »', () => {
       return calls === 1 ? fail(504, 'Deadline exceeded.') : ok()
     })
 
-    const res = await testGeminiConnection(AQ_KEY)
+    const res = await testGeminiConnection(AQ_KEY, { probe: true })
 
     expect(res.ok).toBe(true)
     expect(res.message).toContain('gemini-3.8-flash · HIGH')
+  })
+
+  it('dit clairement quand la clé est valide mais n’ouvre pas le modèle 3.8', async () => {
+    const mock = stubFetch((url) =>
+      isList(url) ? modelList(['gemini-2.5-flash']) : ok(),
+    )
+
+    const res = await testGeminiConnection(AQ_KEY)
+
+    expect(res).toMatchObject({ ok: false, kind: 'model_not_found' })
+    expect(res.message).toContain('La clé est valide')
+    expect(res.message).toContain('0 requête')
+    expect(generationUrls(mock)).toHaveLength(0)
   })
 
   it('n’envoie jamais une requête devenue périmée en file : zéro quota consommé', async () => {

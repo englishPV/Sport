@@ -64,12 +64,6 @@ function stubGemini() {
   return { mock, asked }
 }
 
-const bothPlansFromAi = () => {
-  expect(store().coachPlans.up.source).toBe('gemini')
-  expect(store().coachPlans.legs.source).toBe('gemini')
-  expect(store().aiLoading).toBe(false)
-}
-
 afterEach(async () => {
   store().exitSimulation()
   await vi.waitFor(() => expect(store().aiLoading).toBe(false))
@@ -90,25 +84,25 @@ describe('mode test', () => {
 
     store().startSimulation()
 
-    // La séance du jour (Haut, car la dernière date est Jambes) passe en premier, l'autre suit en arrière-plan.
+    // La séance du jour (Haut, car la dernière date est Jambes) : une seule requête.
     expect(store().simulation).not.toBeNull()
     expect(store().activeDraft.section).toBe('up')
-    await vi.waitFor(bothPlansFromAi)
-    expect(asked).toEqual(['up', 'legs'])
+    await vi.waitFor(() => expect(store().coachPlans.up.source).toBe('gemini'))
+    expect(store().aiLoading).toBe(false)
+    expect(asked).toEqual(['up'])
+    // La séance opposée reste sur son calcul local jusqu'à ce qu'on l'ouvre.
+    expect(store().coachPlans.legs.source).toBe('ddp')
 
     store().simulateWholeSession()
     expect(store().sessionPhase).toBe('done')
 
     const summary = store().saveCompletedWorkout()
-    expect(summary).toMatchObject({ validatedSets: 2, nextRecommended: 'legs', nextAlreadyGenerated: true })
+    expect(summary).toMatchObject({ validatedSets: 2, nextRecommended: 'legs', nextAlreadyGenerated: false })
     expect(store().completedSessions).toHaveLength(1)
+    // La séance suivante est demandée à Gemini une fois, pendant que Jambes devient la séance du jour.
+    await vi.waitFor(() => expect(asked).toEqual(['up', 'legs']))
     expect(store().activeDraft.section).toBe('legs')
-
-    // La séance qui vient d'être faite est recalculée en arrière-plan pour la fois d'après.
-    await vi.waitFor(() => {
-      expect(asked).toEqual(['up', 'legs', 'up'])
-      bothPlansFromAi()
-    })
+    expect(store().coachPlans.legs.source).toBe('gemini')
 
     // Rien de simulé n'a atteint le stockage du navigateur.
     expect(saved().version).toBe(SCHEMA_VERSION)

@@ -332,7 +332,15 @@ export function classifyHttpError(status: number, payload: unknown, model: strin
   if (/SERVICE_DISABLED|has not been used in project|is disabled/i.test(blob)) {
     return new GeminiError(
       'api_disabled',
-      'L’API Gemini n’est pas activée pour le projet Google de cette clé. Activez « Generative Language API » ou créez la clé depuis aistudio.google.com/apikey.',
+      'L’API Gemini n’est pas activée pour le projet Google de cette clé (le site ne l’active pas lui-même). Créez plutôt la clé sur aistudio.google.com/apikey : elle naît avec l’API déjà active.',
+      extra,
+    )
+  }
+  /** Clé « Generative Language » (AI Studio) présentée à Vertex, ou l’inverse. */
+  if (/CONSUMER_INVALID|CONSUMER_SUSPENDED|API key .* not valid for|not authorized to use this API|service account/i.test(blob)) {
+    return new GeminiError(
+      'permission',
+      'Cette clé n’ouvre pas ce service Google (clé AI Studio d’un service, ou projet refusé). Choisis « Google AI Studio » dans les options avancées, ou crée la clé sur aistudio.google.com/apikey.',
       extra,
     )
   }
@@ -380,6 +388,36 @@ export function classifyHttpError(status: number, payload: unknown, model: strin
     return new GeminiError('bad_request', `Requête refusée par Google : ${detail || 'paramètre invalide'}.`, extra)
   }
   return new GeminiError('unknown', `Erreur ${status} renvoyée par Google.${detail ? ` ${detail}` : ''}`, extra)
+}
+
+/* --------------------------- Journal des appels --------------------------- */
+
+/** Une requête réellement envoyée à Google (les annulées en file n'y figurent pas). */
+export interface GeminiCallRecord {
+  tag: string
+  at: number
+}
+
+/**
+ * Journal en mémoire des appels réseau réellement partis chez Google.
+ * Il alimente le compteur « requêtes IA » des Réglages : c'est la seule façon
+ * honnête de dire combien de requêtes le site a consommées (Google AI Studio
+ * compte des appels que l'app ne voit pas, et inversement).
+ */
+const callLog: GeminiCallRecord[] = []
+const CALL_LOG_LIMIT = 200
+
+export function getGeminiCallLog(): GeminiCallRecord[] {
+  return [...callLog]
+}
+
+export function resetGeminiCallLog(): void {
+  callLog.length = 0
+}
+
+function recordGeminiCall(tag: string): void {
+  callLog.push({ tag, at: Date.now() })
+  if (callLog.length > CALL_LOG_LIMIT) callLog.splice(0, callLog.length - CALL_LOG_LIMIT)
 }
 
 /* ------------------------------ Requête ---------------------------------- */
@@ -588,7 +626,10 @@ async function callModel(params: {
         }
         // L'erreur du canal principal est la plus parlante, sauf simple coupure réseau.
         if (!firstError || firstError.kind === 'network') firstError = err
-        if (!CHANNEL_SPECIFIC.has(err.kind)) throw firstError
+        // 404 = le modèle n'est pas exposé par ce service, pas une erreur de clé :
+        // inutile d'aller voir l'autre endpoint Google pour un simple 404 de chemin.
+        const channelSpecific = CHANNEL_SPECIFIC.has(err.kind) || err.kind === 'model_not_found'
+        if (!channelSpecific || channels.length === 1) throw firstError
         break
       }
     }
@@ -616,19 +657,33 @@ export async function generateJson(params: {
 
   return enqueue(
     // Un seul modèle est interrogé, celui qui est réglé : aucun basculement silencieux.
-    () =>
-      callModel({
+    () => {
+      // Compté ici, au moment exact de l'envoi : une requête annulée en file ne compte pas.
+      if (params.tag !== TEST_REQUEST_TAG) recordGeminiCall(params.tag ?? '')
+      return callModel({
         cleanKey,
         model,
         prompt: params.prompt,
         responseSchema: params.responseSchema,
         timeoutMs: params.timeoutMs ?? GENERATION_TIMEOUT_MS,
-      }),
+      })
+    },
     params.priority ?? 'normal',
     params.tag,
     params.isStale,
     params.requestSpacingMs,
   )
+}
+
+/** Étiquette lisible d'un appel, pour le compteur des Réglages. */
+export function geminiCallLabel(tag: string): string {
+  if (tag === TEST_REQUEST_TAG) return 'test de clé'
+  if (tag === 'workout-import') return 'import de texte'
+  if (tag.startsWith('coach-plan:')) {
+    return tag.endsWith(':up') ? 'plan Haut' : tag.endsWith(':legs') ? 'plan Jambes' : 'plan de séance'
+  }
+  if (tag === 'stats-analysis') return 'analyse des stats'
+  return tag || 'génération'
 }
 
 /** Compatibilité : renvoie uniquement le texte JSON. */
@@ -679,15 +734,61 @@ export interface ConnectionTestResult {
   kind?: GeminiErrorKind
   models?: string[]
   latencyMs?: number
+  /** Modèle et service qui ont répondu, pour ne pas relancer une requête juste après. */
+  model?: string
+  channel?: ConcreteChannel
 }
 
 const TEST_PROMPT = 'Réponds uniquement {"status":"ok"} en JSON.'
 const TEST_SCHEMA = { type: 'OBJECT', properties: { status: { type: 'STRING' } }, required: ['status'] }
+/** Tag du test : il n'est pas compté dans le journal des générations (c'est un test, pas une séance). */
+const TEST_REQUEST_TAG = 'connection-test'
 
-export async function testGeminiConnection(apiKey: string): Promise<ConnectionTestResult> {
+/**
+ * Teste la clé sans gaspiller de quota.
+ *
+ * `listGeminiModels` (lecture de la liste) prouve déjà que la clé est acceptée et
+ * donne le canal qui la reconnaît. Par défaut (`probe: false`) on s'arrête là :
+ * zéro requête de génération, alors qu'un vrai test de génération consomme une
+ * requête du quota — sans compter celle qui part juste après pour le plan de séance.
+ * `probe: true` envoie en plus une génération minimale (cas « ma clé marche mais
+ * le modèle répond bizarrement »).
+ */
+export async function testGeminiConnection(
+  apiKey: string,
+  options: { probe?: boolean } = {},
+): Promise<ConnectionTestResult> {
   if (!sanitizeApiKey(apiKey)) return { ok: false, kind: 'missing_key', message: 'Collez d’abord une clé API.' }
   const model = config.model
   const models = await listGeminiModels(apiKey).catch(() => undefined)
+
+  if (!options.probe) {
+    if (models === undefined) {
+      // La liste elle-même a échoué : on ne sait pas encore si la clé est bonne.
+      return {
+        ok: false,
+        kind: 'network',
+        message:
+          'Impossible de vérifier la clé auprès de Google (liste des modèles injoignable : réseau, pare-feu ou bloqueur de publicité). Aucune requête de génération n’a été envoyée.',
+      }
+    }
+    const supported = models.filter(isSupportedGeminiModel)
+    if (supported.length === 0 || !supported.includes(model)) {
+      return {
+        ok: false,
+        kind: 'model_not_found',
+        models,
+        message: `La clé est valide, mais elle n’ouvre pas ${model}${supported.length > 0 ? ` (elle donne accès à ${supported.slice(0, 3).join(', ')})` : ' ni aucun modèle 3.8+'}. Vérifie le projet Google associé à la clé ou crée-en une sur aistudio.google.com/apikey. 0 requête du quota consommée par le test.`,
+      }
+    }
+    return {
+      ok: true,
+      models,
+      model,
+      message: `Clé valide : ${modelLabel(model)} est accessible (${CHANNEL_LABEL.ai_studio}). Vérification sans génération — 0 requête du quota consommée par le test.`,
+    }
+  }
+
   const base = { apiKey, prompt: TEST_PROMPT, responseSchema: TEST_SCHEMA, priority: 'high' as const }
 
   try {
@@ -696,13 +797,15 @@ export async function testGeminiConnection(apiKey: string): Promise<ConnectionTe
       ...base,
       model,
       timeoutMs: TEST_TIMEOUT_MS,
-      tag: 'connection-test',
+      tag: TEST_REQUEST_TAG,
       requestSpacingMs: APP_REQUEST_SPACING_MS,
     })
     return {
       ok: true,
       models,
       latencyMs: res.latencyMs,
+      model: res.model,
+      channel: res.channel,
       message: `Connexion réussie : ${modelLabel(model)} a répondu en ${(res.latencyMs / 1000).toFixed(1).replace('.', ',')} s (${CHANNEL_LABEL[res.channel]}).`,
     }
   } catch (raw) {
