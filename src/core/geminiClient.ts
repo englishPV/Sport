@@ -107,6 +107,8 @@ const TEST_TIMEOUT_MS = 180_000
 const LIST_TIMEOUT_MS = 15_000
 const RETRY_DELAYS_MS = [1500, 4000]
 const MAX_RETRY_WAIT_MS = 15_000
+/** Laisse de la marge sous le palier gratuit fréquent de 5 requêtes/minute. */
+export const APP_REQUEST_SPACING_MS = isTestEnv() ? 0 : 13_000
 
 let config: GeminiConfig = { model: DEFAULT_GEMINI_MODEL, channel: 'auto', baseUrl: '' }
 const workingChannelByRoute = new Map<string, ConcreteChannel>()
@@ -182,6 +184,8 @@ function candidateChannels(cleanKey: string, model: string): ConcreteChannel[] {
 interface QueuedTask {
   run: () => Promise<unknown>
   tag: string
+  /** Intervalle minimum avant l'appel réseau pour ne pas dépasser les quotas RPM bas. */
+  requestSpacingMs?: number
   /** Vrai quand les données ont changé depuis la mise en file : la requête ne doit pas partir. */
   isStale?: () => boolean
   resolve: (value: unknown) => void
@@ -192,6 +196,7 @@ let queueBusy = false
 /** Incrémenté à chaque remise à zéro : une tâche d'une génération passée ne touche plus à la file. */
 let queueGeneration = 0
 const pendingQueue: QueuedTask[] = []
+let lastPacedRequestAt = 0
 
 function drainQueue(): void {
   if (queueBusy) return
@@ -206,8 +211,18 @@ function drainQueue(): void {
   if (!task) return
   queueBusy = true
   const generation = queueGeneration
-  task
-    .run()
+  const run = async () => {
+    if (task.requestSpacingMs && task.requestSpacingMs > 0) {
+      const waitMs = lastPacedRequestAt + task.requestSpacingMs - Date.now()
+      if (waitMs > 0) await sleep(waitMs, false)
+      if (generation !== queueGeneration || task.isStale?.()) {
+        throw new GeminiError('cancelled', 'Requête annulée avant envoi (données modifiées).')
+      }
+      lastPacedRequestAt = Date.now()
+    }
+    return task.run()
+  }
+  run()
     .then(task.resolve, task.reject)
     .finally(() => {
       if (generation !== queueGeneration) return
@@ -222,12 +237,14 @@ function enqueue<T>(
   priority: 'high' | 'normal',
   tag = '',
   isStale?: () => boolean,
+  requestSpacingMs?: number,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const task: QueuedTask = {
       run,
       tag,
       isStale,
+      requestSpacingMs,
       resolve: resolve as (v: unknown) => void,
       reject,
     }
@@ -252,6 +269,7 @@ export function resetGeminiClientState(): void {
   const dropped = pendingQueue.splice(0, pendingQueue.length)
   for (const task of dropped) task.reject(new GeminiError('cancelled', 'Requête annulée.'))
   queueBusy = false
+  lastPacedRequestAt = 0
   workingChannelByRoute.clear()
   thinkingRejected.clear()
   config = { model: DEFAULT_GEMINI_MODEL, channel: 'auto', baseUrl: '' }
@@ -272,6 +290,15 @@ function currentOrigin(): string {
   return typeof window !== 'undefined' && window.location?.origin ? window.location.origin : ''
 }
 
+function parseRetryDelayMs(raw: string): number | null {
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)$/i.exec(raw.trim())
+  if (!match) return null
+  const value = Number(match[1])
+  const unit = match[2].toLowerCase()
+  const factor = unit === 'ms' ? 1 : unit === 's' ? 1000 : unit === 'm' ? 60_000 : 3_600_000
+  return Math.max(1, Math.round(value * factor))
+}
+
 function seconds(ms: number): string {
   return String(Math.max(1, Math.round(ms / 1000)))
 }
@@ -282,7 +309,7 @@ export function classifyHttpError(status: number, payload: unknown, model: strin
   const reasons = (err?.details ?? []).map((d) => d?.reason ?? '').join(' ')
   const blob = `${err?.status ?? ''} ${reasons} ${detail}`
   const retryRaw = (err?.details ?? []).find((d) => typeof d?.retryDelay === 'string')?.retryDelay
-  const retryAfterMs = retryRaw ? Math.round(parseFloat(retryRaw) * 1000) || null : null
+  const retryAfterMs = retryRaw ? parseRetryDelayMs(retryRaw) : null
   const extra = { status, detail, retryAfterMs }
 
   if (/API_KEY_HTTP_REFERRER_BLOCKED|referr?er/i.test(blob)) {
@@ -317,16 +344,21 @@ export function classifyHttpError(status: number, payload: unknown, model: strin
     )
   }
   if (status === 429) {
-    if (/limit:\s*0\b|billing|exceeded your current quota/i.test(blob) && !retryAfterMs) {
+    const dailyQuota = /per.?day|perday|daily|requests.?per.?day|GenerateRequestsPerDay/i.test(blob)
+    const minuteLimit = /per.?minute|perminute|rpm|GenerateRequestsPerMinute/i.test(blob)
+    const exhaustedQuota =
+      /limit:\s*0\b|billing|exceeded your current quota/i.test(blob) && !retryAfterMs && !minuteLimit
+    if (dailyQuota || exhaustedQuota) {
+      const resetHint = retryAfterMs ? ` Google indique une nouvelle tentative dans ${seconds(retryAfterMs)} s.` : ''
       return new GeminiError(
         'quota',
-        `Quota épuisé pour « ${model} » avec cette clé. Choisissez un autre modèle ou activez la facturation du projet.`,
+        `Quota Gemini épuisé pour « ${model} » (limite journalière ou quota du projet). Aucune nouvelle tentative automatique ne sera envoyée.${resetHint} Vérifie la réinitialisation dans Google AI Studio.`,
         extra,
       )
     }
     return new GeminiError(
       'rate_limited',
-      `Trop de requêtes pour l’instant sur « ${model} ».${retryAfterMs ? ` Réessayez dans ${seconds(retryAfterMs)} s.` : ' Réessayez dans une minute.'}`,
+      `Limite de requêtes par minute atteinte pour « ${model} ». Aucune nouvelle tentative automatique ne sera envoyée.${retryAfterMs ? ` Réessaie dans ${seconds(retryAfterMs)} s.` : ' Réessaie un peu plus tard.'}`,
       extra,
     )
   }
@@ -365,8 +397,8 @@ function isTestEnv(): boolean {
   return (import.meta as { env?: { MODE?: string } }).env?.MODE === 'test'
 }
 
-function sleep(ms: number): Promise<void> {
-  if (isTestEnv()) return Promise.resolve()
+function sleep(ms: number, bypassInTests = true): Promise<void> {
+  if (bypassInTests && isTestEnv()) return Promise.resolve()
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
@@ -547,7 +579,8 @@ async function callModel(params: {
         const err = raw instanceof GeminiError ? raw : new GeminiError('unknown', String(raw))
         // Aucun autre modèle ne prend le relais : seules les surcharges passagères sont retentées,
         // sur le même modèle (un délai dépassé doublerait l'attente pour rien).
-        const retryable = err.kind === 'rate_limited' || err.kind === 'overloaded'
+        // Un 429 compte lui-même dans le quota : ne le relance jamais automatiquement.
+        const retryable = err.kind === 'overloaded'
         const wait = err.retryAfterMs ?? RETRY_DELAYS_MS[attempt]
         if (retryable && attempt < RETRY_DELAYS_MS.length && wait <= MAX_RETRY_WAIT_MS) {
           await sleep(wait)
@@ -573,6 +606,8 @@ export async function generateJson(params: {
   tag?: string
   /** Vrai quand les données ont changé : la requête en file ne part pas (zéro quota). */
   isStale?: () => boolean
+  /** Pacing optionnel pour les flux de l'application ; absent dans les tests ciblés du client. */
+  requestSpacingMs?: number
   model?: string
 }): Promise<GeminiJsonResult> {
   const cleanKey = sanitizeApiKey(params.apiKey)
@@ -592,6 +627,7 @@ export async function generateJson(params: {
     params.priority ?? 'normal',
     params.tag,
     params.isStale,
+    params.requestSpacingMs,
   )
 }
 
@@ -604,6 +640,7 @@ export async function postGenerateContent(params: {
   priority?: 'high' | 'normal'
   tag?: string
   isStale?: () => boolean
+  requestSpacingMs?: number
 }): Promise<string> {
   return (await generateJson(params)).text
 }
@@ -655,7 +692,13 @@ export async function testGeminiConnection(apiKey: string): Promise<ConnectionTe
 
   try {
     // Le modèle réglé est le seul interrogé : si le test échoue, la génération échouera aussi.
-    const res = await generateJson({ ...base, model, timeoutMs: TEST_TIMEOUT_MS })
+    const res = await generateJson({
+      ...base,
+      model,
+      timeoutMs: TEST_TIMEOUT_MS,
+      tag: 'connection-test',
+      requestSpacingMs: APP_REQUEST_SPACING_MS,
+    })
     return {
       ok: true,
       models,

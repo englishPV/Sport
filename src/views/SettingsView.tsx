@@ -231,6 +231,10 @@ export function SettingsView({ onBack }: { onBack: () => void }) {
           </div>
         </details>
 
+        <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+          « Tester la clé » envoie une vraie requête au modèle : elle compte dans les quotas RPM/RPD de Google.
+        </p>
+
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"

@@ -132,12 +132,6 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
   const [metric, setMetric] = useState<ChartMetric>('maxWeight')
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
 
-  useEffect(() => {
-    if (apiKey.trim()) {
-      void refreshAiStats(false)
-    }
-  }, [apiKey, exercises.length, completedSessions.length, refreshAiStats])
-
   const activeAllExercises = useMemo(
     () => exercises.filter((e) => e.active),
     [exercises],
@@ -341,7 +335,7 @@ export function ProgressView({ onBack }: { onBack?: () => void }) {
               onClick={() => void refreshAiStats(true)}
               className="tap text-xs font-semibold text-slate-400 hover:text-indigo-600 disabled:opacity-40 dark:hover:text-indigo-400"
             >
-              Actualiser
+              {freshAiStats ? 'Actualiser IA' : 'Analyser avec l’IA'}
             </button>
           ) : null}
         </div>

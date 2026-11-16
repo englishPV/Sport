@@ -21,7 +21,7 @@ import {
   type WorkoutSet,
 } from './types'
 import { buildCoachPrompt, guardExercisePlan } from './coachPrompt'
-import { generateJson, getGeminiConfig, postGenerateContent } from './geminiClient'
+import { APP_REQUEST_SPACING_MS, generateJson, getGeminiConfig, postGenerateContent } from './geminiClient'
 
 export * from './geminiClient'
 export { buildCoachPrompt, computeExerciseTrend, guardExercisePlan } from './coachPrompt'
@@ -212,6 +212,7 @@ export async function generateGeminiSessionPlan(params: {
     priority,
     tag: coachRequestTag(section),
     isStale: params.isStale,
+    requestSpacingMs: APP_REQUEST_SPACING_MS,
   })
 
   let parsed: RawGeminiPlanJson
@@ -377,6 +378,8 @@ ${rawText}
     responseSchema: EXTRACT_WORKOUT_SCHEMA,
     timeoutMs: 150_000,
     priority: 'high',
+    tag: 'workout-import',
+    requestSpacingMs: APP_REQUEST_SPACING_MS,
   })
 
   const parsed = JSON.parse(responseText) as { exercises?: unknown }
@@ -573,6 +576,7 @@ ${JSON.stringify(payload)}`
     priority: 'normal',
     tag: STATS_REQUEST_TAG,
     isStale: params.isStale,
+    requestSpacingMs: APP_REQUEST_SPACING_MS,
   })
 
   const parsed = JSON.parse(responseText) as {
