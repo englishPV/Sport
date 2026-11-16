@@ -61,8 +61,9 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
 
     // Changement interactif dans l'interface
     render(<App />)
+    useWorkoutStore.getState().clearApiKey()
     act(() => {
-      useWorkoutStore.getState().startWorkout()
+      void useWorkoutStore.getState().startWorkout()
     })
 
     const repsCard = screen.getByTestId('reps-card')
@@ -129,7 +130,13 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
       ),
     )
 
-    useWorkoutStore.getState().startWorkout()
+    // Démarre sans IA, puis simule une génération lancée pendant la séance pour tester
+    // la mise à jour arrière-plan sans bloquer l'accès à l'exercice.
+    useWorkoutStore.getState().clearApiKey()
+    await useWorkoutStore.getState().startWorkout()
+    useWorkoutStore.getState().updateSettings({ apiKey: TEST_VERTEX_KEY })
+    const coachPromise = useWorkoutStore.getState().askGeminiCoach('legs', { priority: 'high' })
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled())
     const legPressLog = useWorkoutStore.getState().activeDraft.logs['ex-leg-press']
     const set1Id = legPressLog.sets[0].id
 
@@ -171,6 +178,7 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
           ],
         }),
       })
+      await coachPromise
     })
 
     const updatedLog = useWorkoutStore.getState().activeDraft.logs['ex-leg-press']
@@ -208,13 +216,14 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     expect(screen.getByRole('button', { name: /\+\d+s/ })).toBeInTheDocument()
   })
 
-  it('retient 100% des temps en backend : temps en exercice, temps en repos, temps total, reps, poids et commentaires', () => {
+  it('retient 100% des temps en backend : temps en exercice, temps en repos, temps total, reps, poids et commentaires', async () => {
     const baseNow = 1_700_000_000_000
     let fakeNow = baseNow
     vi.spyOn(Date, 'now').mockImplementation(() => fakeNow)
 
-    // 1. Début de séance à t = 0s
-    useWorkoutStore.getState().startWorkout()
+    // 1. Début de séance à t = 0s (sans génération IA dans ce test de chronométrage)
+    useWorkoutStore.getState().clearApiKey()
+    await useWorkoutStore.getState().startWorkout()
 
     // 2. Exécution de la série 1 pendant 42 secondes + commentaire
     const legPressEx = useWorkoutStore
@@ -337,6 +346,92 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     expect(screen.getByRole('button', { name: 'Commencer' })).toBeInTheDocument()
   })
 
+  it('attend la génération IA de la séance choisie avant d’ouvrir le premier exercice', async () => {
+    const user = userEvent.setup()
+    useWorkoutStore.getState().clearApiKey()
+    await useWorkoutStore.getState().importNotepadSmart(
+      [
+        'Up',
+        'Développé incliné haltères :',
+        '• 22/10/2026 : 22kg x 10',
+        '',
+        'Jambes (Legs)',
+        'Leg press :',
+        '• 19/10/2026 : 130kg x 12',
+      ].join('\n'),
+    )
+    useWorkoutStore.getState().updateSettings({ apiKey: TEST_VERTEX_KEY })
+    expect(useWorkoutStore.getState().coachPlans.legs.source).toBe('ddp')
+    let resolveFirstFetch!: (value: unknown) => void
+    let fetchCount = 0
+    const successfulPlanResponse = {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    summary_lines: ['Jambes prêt'],
+                    exercises: [
+                      {
+                        exercise_id: 'ex-leg-press',
+                        rest_seconds: 150,
+                        tip: 'Amplitude complète.',
+                        sets: [
+                          {
+                            weight: 140,
+                            reps_min: 8,
+                            reps_max: 12,
+                            target_reps: 9,
+                            is_warmup: false,
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    }
+    const fetchMock = vi.fn().mockImplementation(() => {
+      fetchCount += 1
+      if (fetchCount > 1) return Promise.resolve(successfulPlanResponse)
+      return new Promise((resolve) => {
+        resolveFirstFetch = resolve
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Jambes' }))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(useWorkoutStore.getState().aiGeneratingSections.legs).toBe(true)
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Commencer' }))
+    expect(useWorkoutStore.getState().sessionPhase).toBe('idle')
+    expect(useWorkoutStore.getState().workoutStarting).toBe(true)
+    expect(screen.getByRole('button', { name: 'Préparation de la séance…' })).toBeDisabled()
+
+    // Le plan Jambes arrive : la séance commence alors, sans attendre la pré-génération Haut.
+    await act(async () => {
+      resolveFirstFetch(successfulPlanResponse)
+    })
+
+    await waitFor(() => expect(useWorkoutStore.getState().sessionPhase).toBe('working'))
+    expect(useWorkoutStore.getState().workoutStarting).toBe(false)
+    const legsLog = useWorkoutStore.getState().activeDraft.logs['ex-leg-press']
+    expect(legsLog.sets.find((set) => !set.isWarmup)?.weight).toBe(140)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+  })
+
   it('pré-génère Haut (Up) quand on appuie sur Jambes (et génère Jambes si absent), puis confirme en fin de séance que la prochaine séance est déjà générée', async () => {
     const user = userEvent.setup()
 
@@ -424,6 +519,7 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(useWorkoutStore.getState().aiGeneratingSections).toEqual({ up: false, legs: false })
     })
     expect(requestedPrompts[0]).toContain('séance déjà choisie par l\'application : Jambes (Legs)')
     expect(requestedPrompts[1]).toContain('séance déjà choisie par l\'application : Haut du corps (Up)')

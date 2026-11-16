@@ -72,6 +72,7 @@ export interface UndoSnapshot {
 }
 
 let storeEpoch = 0
+let workoutStartEpoch = 0
 const inFlightCoachBySection: Partial<Record<SectionId, Promise<void>>> = {}
 
 /**
@@ -431,6 +432,8 @@ export interface WorkoutStoreState {
   coachPlans: Record<SectionId, CoachSessionPlan>
   activeDraft: ActiveDraft
   sessionPhase: SessionPhase
+  /** True while the first AI plan is being prepared before entering the workout. */
+  workoutStarting: boolean
   cursor: StepCursor
   restTimer: RestTimerState | null
   undoStack: UndoSnapshot[]
@@ -444,7 +447,7 @@ export interface WorkoutStoreState {
   setLastToast: (msg: string | null) => void
 
   selectSection: (section: SectionId) => void
-  startWorkout: () => void
+  startWorkout: () => Promise<void>
   exitWorkout: () => void
   validateCurrentSet: () => void
   onRestCountdownReachedZero: () => void
@@ -539,6 +542,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       ...createInitialData(),
       aiLoading: false,
       aiGeneratingSections: { up: false, legs: false },
+      workoutStarting: false,
       aiStatsLoading: false,
       aiStatsError: null,
       aiError: null,
@@ -549,6 +553,8 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       selectSection: (section) => {
         const state = get()
         if (state.activeDraft.section !== section) {
+          workoutStartEpoch += 1
+          set({ workoutStarting: false })
           // Un plan IA périmé (historique modifié) repart de la DDP : la séance reste alignée
           // sur les dernières séries, sans attendre la nouvelle réponse de Gemini.
           const plan = isGeminiPlanFresh(state.coachPlans[section], state.exercises, section, state.preamble)
@@ -579,9 +585,40 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         void get().ensureSessionPlansGenerated(section)
       },
 
-      startWorkout: () => {
+      startWorkout: async () => {
+        const initial = get()
+        if (initial.sessionPhase !== 'idle' || initial.workoutStarting) return
+
+        const section = initial.activeDraft.section
+        const shouldWaitForCurrentPlan =
+          hasSectionHistory(initial.exercises, section) &&
+          Boolean(sanitizeApiKey(initial.settings.apiKey)) &&
+          !isGeminiPlanFresh(
+            initial.coachPlans[section],
+            initial.exercises,
+            section,
+            initial.preamble,
+          )
+        const startEpoch = ++workoutStartEpoch
+
+        // Lance les deux générations sans attendre la suivante. La séance sélectionnée
+        // est prioritaire et doit être prête avant d'afficher le premier exercice.
+        void get().ensureSessionPlansGenerated(section)
+        if (shouldWaitForCurrentPlan) {
+          set({ workoutStarting: true, aiError: null })
+          await get().askGeminiCoach(section, { priority: 'high' })
+        }
+
+        // L'utilisateur a pu changer de section ou annuler le démarrage pendant l'attente.
         const state = get()
-        const section = state.activeDraft.section
+        if (
+          startEpoch !== workoutStartEpoch ||
+          state.activeDraft.section !== section ||
+          state.sessionPhase !== 'idle'
+        ) {
+          return
+        }
+
         const activeExercises = state.exercises.filter(
           (e) => e.section === section && e.active,
         )
@@ -594,6 +631,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         const now = Date.now()
 
         set({
+          workoutStarting: false,
           sessionPhase: next ? 'working' : 'done',
           cursor: next ?? { exerciseIdx: 0, setIdx: 0 },
           activeDraft: {
@@ -603,12 +641,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             phaseStartedAt: state.activeDraft.phaseStartedAt ?? now,
           },
         })
-
-        void get().ensureSessionPlansGenerated(section)
       },
 
       exitWorkout: () => {
-        set({ sessionPhase: 'idle' })
+        workoutStartEpoch += 1
+        set({ sessionPhase: 'idle', workoutStarting: false })
       },
 
       validateCurrentSet: () => {

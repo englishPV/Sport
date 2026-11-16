@@ -155,6 +155,7 @@ export function WorkoutView() {
   const coachPlans = useWorkoutStore((s) => s.coachPlans)
   const activeDraft = useWorkoutStore((s) => s.activeDraft)
   const sessionPhase = useWorkoutStore((s) => s.sessionPhase)
+  const workoutStarting = useWorkoutStore((s) => s.workoutStarting)
   const cursor = useWorkoutStore((s) => s.cursor)
   const restTimer = useWorkoutStore((s) => s.restTimer)
   const undoStack = useWorkoutStore((s) => s.undoStack)
@@ -451,13 +452,24 @@ export function WorkoutView() {
 
         <button
           type="button"
+          disabled={workoutStarting}
           onClick={() => {
             setSavedToast(null)
-            startWorkout()
+            void startWorkout()
           }}
-          className="mt-8 w-full max-w-xs rounded-2xl bg-indigo-600 px-8 py-4 text-lg font-bold text-white shadow-lg shadow-indigo-600/25 transition-all duration-200 ease-smooth hover:-translate-y-0.5 hover:bg-indigo-500 hover:shadow-xl hover:shadow-indigo-600/30 active:translate-y-0 active:scale-[0.98]"
+          aria-live="polite"
+          className="mt-8 flex w-full max-w-xs items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-8 py-4 text-lg font-bold text-white shadow-lg shadow-indigo-600/25 transition-all duration-200 ease-smooth hover:-translate-y-0.5 hover:bg-indigo-500 hover:shadow-xl hover:shadow-indigo-600/30 active:translate-y-0 active:scale-[0.98] disabled:cursor-wait disabled:opacity-80 disabled:hover:translate-y-0"
         >
-          {validatedCount > 0 ? `Reprendre (${validatedCount}/${totalSetsCount})` : 'Commencer'}
+          {workoutStarting ? (
+            <>
+              <Sparkles className="h-5 w-5 animate-pulse" aria-hidden="true" />
+              Préparation de la séance…
+            </>
+          ) : validatedCount > 0 ? (
+            `Reprendre (${validatedCount}/${totalSetsCount})`
+          ) : (
+            'Commencer'
+          )}
         </button>
 
         {validatedCount > 0 && (
