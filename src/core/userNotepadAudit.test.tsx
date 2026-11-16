@@ -222,22 +222,30 @@ describe('Carnet réel collé sur le site (audit & non-régression)', () => {
   })
 
   it('exporte et réimporte les lignes (Objectif) du jour sans inverser la séance recommandée', () => {
-    const parsed = parseNotepad(USER_PASTED_NOTEPAD_NOV, { todayIso: '2026-11-11' })
-    const legsPlan = buildDdpSessionPlan(parsed.exercises, 'legs')
-    const exportedWithObj = exportNotepad({
-      preamble: parsed.preamble,
-      exercises: parsed.exercises,
-      plan: legsPlan,
-      planDateIso: '2026-11-11',
-      includeObjectives: true,
-    })
-    expect(exportedWithObj).toContain('• 11/11/2026 (Objectif) :')
+    // Le scénario utilise le 11/11/2026 comme « aujourd'hui » : fige l'horloge pour qu'il
+    // reste valide après cette date également.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-11T12:00:00Z'))
+    try {
+      const parsed = parseNotepad(USER_PASTED_NOTEPAD_NOV, { todayIso: '2026-11-11' })
+      const legsPlan = buildDdpSessionPlan(parsed.exercises, 'legs')
+      const exportedWithObj = exportNotepad({
+        preamble: parsed.preamble,
+        exercises: parsed.exercises,
+        plan: legsPlan,
+        planDateIso: '2026-11-11',
+        includeObjectives: true,
+      })
+      expect(exportedWithObj).toContain('• 11/11/2026 (Objectif) :')
 
-    const reimported = parseNotepad(exportedWithObj)
-    // Même sans settlement, un (Objectif) daté d'aujourd'hui (2026-11-11) ne passe pas pour une séance faite
-    const rec = getRecommendedSection(reimported.exercises)
-    expect(rec.recommended).toBe('legs')
-    expect(rec.legsLastDate).toBe('2026-11-03')
+      const reimported = parseNotepad(exportedWithObj)
+      // Même sans settlement, un (Objectif) daté d'aujourd'hui ne passe pas pour une séance faite.
+      const rec = getRecommendedSection(reimported.exercises)
+      expect(rec.recommended).toBe('legs')
+      expect(rec.legsLastDate).toBe('2026-11-03')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('gère une vraie séance en salle : fourchette verte 8-10, commentaire par série, repos intra-exo pur et ajout/saut de série', async () => {
