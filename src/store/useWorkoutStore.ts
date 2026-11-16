@@ -84,23 +84,31 @@ const inFlightCoachBySection: Partial<Record<SectionId, Promise<void>>> = {}
  */
 const COACH_FAILURE_COOLDOWN_MS = 60_000
 const STATS_FAILURE_COOLDOWN_MS = 60_000
-const lastCoachFailureAt: Partial<Record<SectionId, number>> = {}
-let lastStatsFailureAt = 0
+const coachRetryAt: Partial<Record<SectionId, number>> = {}
+let statsRetryAt = 0
+
+function failureCooldownMs(error: unknown, fallbackMs: number): number {
+  if (error instanceof GeminiError) {
+    if (error.retryAfterMs) return Math.max(fallbackMs, error.retryAfterMs)
+    if (error.kind === 'quota') return 24 * 60 * 60 * 1000
+  }
+  return fallbackMs
+}
 
 function coachCooldownRemainingMs(section: SectionId): number {
-  const at = lastCoachFailureAt[section]
-  if (!at) return 0
-  return Math.max(0, COACH_FAILURE_COOLDOWN_MS - (Date.now() - at))
+  const retryAt = coachRetryAt[section]
+  if (!retryAt) return 0
+  return Math.max(0, retryAt - Date.now())
 }
 
 function clearCoachFailure(section: SectionId): void {
-  delete lastCoachFailureAt[section]
+  delete coachRetryAt[section]
 }
 
 function clearAllAiFailures(): void {
-  delete lastCoachFailureAt.up
-  delete lastCoachFailureAt.legs
-  lastStatsFailureAt = 0
+  delete coachRetryAt.up
+  delete coachRetryAt.legs
+  statsRetryAt = 0
 }
 
 function clearInFlightCoachTracking(): void {
@@ -443,6 +451,7 @@ export interface WorkoutStoreState {
   aiStatsLoading: boolean
   aiStatsError: string | null
   aiError: string | null
+  aiErrorSection: SectionId | null
   lastToast: string | null
   setLastToast: (msg: string | null) => void
 
@@ -546,6 +555,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       aiStatsLoading: false,
       aiStatsError: null,
       aiError: null,
+      aiErrorSection: null,
       lastToast: null,
       setLastToast: (msg) => set({ lastToast: msg }),
       simulation: null,
@@ -561,7 +571,6 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             ? state.coachPlans[section]
             : buildDdpSessionPlan(state.exercises, section)
           set({
-            aiError: null,
             sessionPhase: 'idle',
             cursor: { exerciseIdx: 0, setIdx: 0 },
             restTimer: null,
@@ -575,8 +584,6 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
               logs: buildDraftLogsForSection(state.exercises, section, plan),
             },
           })
-        } else if (state.aiError) {
-          set({ aiError: null })
         }
 
         // Quand on appuie sur Jambes (ou Haut) :
@@ -605,7 +612,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         // est prioritaire et doit être prête avant d'afficher le premier exercice.
         void get().ensureSessionPlansGenerated(section)
         if (shouldWaitForCurrentPlan) {
-          set({ workoutStarting: true, aiError: null })
+          set({ workoutStarting: true })
           await get().askGeminiCoach(section, { priority: 'high' })
         }
 
@@ -1472,10 +1479,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           ...state.aiGeneratingSections,
           [section]: true,
         }
+        const clearsOwnError = state.aiErrorSection === section
         set({
           aiGeneratingSections: nextGenState,
           aiLoading: true,
-          aiError: null,
+          ...(clearsOwnError ? { aiError: null, aiErrorSection: null } : {}),
         })
 
         const tracked: { promise?: Promise<void> } = {}
@@ -1522,19 +1530,21 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
                   }
                 : latestState.activeDraft
 
+            const clearsOwnError = latestState.aiErrorSection === section
             set({
               coachPlans: updatedPlans,
               activeDraft: nextDraft,
-              aiError: null,
+              ...(clearsOwnError ? { aiError: null, aiErrorSection: null } : {}),
             })
           } catch (err) {
             if (storeEpoch !== myEpoch) return
             // Annulée car remplacée par des données plus récentes : pas un échec,
             // pas de délai, pas de message d'erreur.
             if (err instanceof GeminiError && err.kind === 'cancelled') return
-            lastCoachFailureAt[section] = Date.now()
+            coachRetryAt[section] = Date.now() + failureCooldownMs(err, COACH_FAILURE_COOLDOWN_MS)
             set({
               aiError: err instanceof Error ? err.message : 'Erreur Gemini.',
+              aiErrorSection: section,
             })
           } finally {
             // Une requête d'avant une remise à zéro ne doit pas effacer le suivi de la suivante.
@@ -1609,9 +1619,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         }
         // Délai anti-spam après échec (429, délai dépassé…) : même garde que côté coach,
         // sinon chaque visite de l'onglet relançait une analyse HIGH de plusieurs minutes.
-        if (!force && lastStatsFailureAt > 0 && Date.now() - lastStatsFailureAt < STATS_FAILURE_COOLDOWN_MS) {
-          return
-        }
+        if (!force && statsRetryAt > Date.now()) return
 
         set({ aiStatsLoading: true, aiStatsError: null })
         try {
@@ -1625,14 +1633,14 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
                 get().completedSessions,
               ) !== fp,
           })
-          lastStatsFailureAt = 0
+          statsRetryAt = 0
           set({ aiStats: analysis, aiStatsLoading: false, aiStatsError: null })
         } catch (err) {
           if (err instanceof GeminiError && err.kind === 'cancelled') {
             set({ aiStatsLoading: false })
             return
           }
-          lastStatsFailureAt = Date.now()
+          statsRetryAt = Date.now() + failureCooldownMs(err, STATS_FAILURE_COOLDOWN_MS)
           set({
             aiStatsLoading: false,
             aiStatsError: err instanceof Error ? err.message : 'Analyse IA indisponible.',

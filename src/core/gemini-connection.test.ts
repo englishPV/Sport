@@ -242,6 +242,57 @@ describe('bouton « Tester la clé »', () => {
     expect(generationUrls(mock)).toHaveLength(1)
   })
 
+  it('ne réessaie pas un 429 et distingue une limite journalière', async () => {
+    const mock = stubFetch(() =>
+      fail(429, 'Resource exhausted', [{ reason: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }, { retryDelay: '24h' }]),
+    )
+
+    const err = await generateJson({ apiKey: AQ_KEY, prompt: 'p' }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(GeminiError)
+    expect((err as GeminiError).kind).toBe('quota')
+    expect((err as GeminiError).message).toContain('limite journalière')
+    expect((err as GeminiError).retryAfterMs).toBe(24 * 60 * 60 * 1000)
+    expect(generationUrls(mock)).toHaveLength(1)
+  })
+
+  it('n’envoie pas de répétitions automatiques après une limite RPM 429', async () => {
+    const mock = stubFetch(() =>
+      fail(429, 'Requests per minute limit exceeded', [
+        { reason: 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier' },
+        { retryDelay: '1s' },
+      ]),
+    )
+
+    const err = await generateJson({ apiKey: AQ_KEY, prompt: 'p' }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(GeminiError)
+    expect((err as GeminiError).kind).toBe('rate_limited')
+    expect((err as GeminiError).retryAfterMs).toBe(1000)
+    expect(generationUrls(mock)).toHaveLength(1)
+  })
+
+  it('espace les appels quand le flux demande un pacing', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(100_000))
+    try {
+      const mock = stubFetch(() => ok())
+      const first = generateJson({ apiKey: AQ_KEY, prompt: 'a', requestSpacingMs: 2000 })
+      await first
+      const second = generateJson({ apiKey: AQ_KEY, prompt: 'b', requestSpacingMs: 2000 })
+      await Promise.resolve()
+      expect(generationUrls(mock)).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(1999)
+      expect(generationUrls(mock)).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await second
+      expect(generationUrls(mock)).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('annule les requêtes en file d’une seule section, pas celles de l’autre', async () => {
     let release: (() => void) | null = null
     let calls = 0

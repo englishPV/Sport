@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { BarChart3, FileText, FlaskConical, Moon, Settings, Sun } from 'lucide-react'
+import { AiErrorNotice } from './components/AiErrorNotice'
 import { SimulationBanner } from './components/SimulationBanner'
 import { useWorkoutStore } from './store/useWorkoutStore'
 import { NotepadView } from './views/NotepadView'
@@ -36,6 +37,7 @@ export default function App() {
     return (
       <>
         <SimulationBanner />
+        <AiErrorNotice />
         <main key="session" className="min-h-dvh animate-fade-in">
           <WorkoutView />
         </main>
@@ -47,6 +49,7 @@ export default function App() {
     return (
       <>
         <SimulationBanner />
+        <AiErrorNotice />
         <div key="notepad" className="min-h-dvh animate-fade-up">
           <NotepadView onBack={() => setScreen('home')} />
         </div>
@@ -57,6 +60,7 @@ export default function App() {
     return (
       <>
         <SimulationBanner />
+        <AiErrorNotice />
         <div key="progress" className="min-h-dvh animate-fade-up">
           <ProgressView onBack={() => setScreen('home')} />
         </div>
@@ -67,6 +71,7 @@ export default function App() {
     return (
       <>
         <SimulationBanner />
+        <AiErrorNotice />
         <div key="settings" className="min-h-dvh animate-fade-up">
           <SettingsView onBack={() => setScreen('home')} />
         </div>
@@ -77,6 +82,7 @@ export default function App() {
   return (
     <div key="home" className="min-h-dvh animate-fade-in">
       <SimulationBanner />
+      <AiErrorNotice />
       {/* Icônes discrètes en haut à droite uniquement sur l'accueil */}
       <header className="mx-auto flex max-w-md animate-fade-in items-center justify-end gap-1.5 px-5 pt-4">
         {simulating ? null : (

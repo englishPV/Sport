@@ -99,6 +99,20 @@ describe('anti-spam des demandes IA', () => {
     expect(requestCount(mock)).toBe(2)
   })
 
+  it('garde visible l’échec d’une section même si l’autre séance est générée avec succès', async () => {
+    await prepareStoreWithKey()
+    const mock = stubFetch((prompt) =>
+      prompt.includes('Haut du corps (Up)') ? quotaExceeded() : okPlan(false),
+    )
+
+    await store().ensureSessionPlansGenerated('up')
+
+    expect(requestCount(mock)).toBe(2)
+    expect(store().coachPlans.legs.source).toBe('gemini')
+    expect(store().aiError).toContain('Quota Gemini')
+    expect(store().aiErrorSection).toBe('up')
+  })
+
   it('un « Réessayer » explicite repart tout de suite, sans attendre le délai', async () => {
     await prepareStoreWithKey()
     const mock = stubFetch(() => quotaExceeded())

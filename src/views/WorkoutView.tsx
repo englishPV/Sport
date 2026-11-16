@@ -162,7 +162,6 @@ export function WorkoutView() {
   const settings = useWorkoutStore((s) => s.settings)
   const aiLoading = useWorkoutStore((s) => s.aiLoading)
   const aiGeneratingSections = useWorkoutStore((s) => s.aiGeneratingSections)
-  const aiError = useWorkoutStore((s) => s.aiError)
 
   const selectSection = useWorkoutStore((s) => s.selectSection)
   const startWorkout = useWorkoutStore((s) => s.startWorkout)
@@ -184,7 +183,6 @@ export function WorkoutView() {
   const toggleExerciseActive = useWorkoutStore((s) => s.toggleExerciseActive)
   const saveCompletedWorkout = useWorkoutStore((s) => s.saveCompletedWorkout)
   const discardActiveWorkout = useWorkoutStore((s) => s.discardActiveWorkout)
-  const ensureSessionPlansGenerated = useWorkoutStore((s) => s.ensureSessionPlansGenerated)
   const adjustRestTimer = useWorkoutStore((s) => s.adjustRestTimer)
   const updateSettings = useWorkoutStore((s) => s.updateSettings)
 
@@ -229,7 +227,6 @@ export function WorkoutView() {
   const activeExercises = exercises.filter((e) => e.section === section && e.active)
   const { recommended } = getRecommendedSection(exercises)
 
-  const hasApiKey = Boolean(settings.apiKey.trim())
   const currentAlreadyGenerated = isGeminiPlanFresh(
     coachPlans[section],
     exercises,
@@ -407,8 +404,7 @@ export function WorkoutView() {
         {(generatingCurrent ||
           generatingNext ||
           currentAlreadyGenerated ||
-          nextAlreadyGenerated ||
-          (aiError && hasApiKey)) && (
+          nextAlreadyGenerated) && (
           <div className="mt-4 min-h-[1.5rem]">
             {generatingCurrent ? (
               <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-indigo-500/10 px-3 py-1 text-xs font-semibold text-indigo-600 dark:text-indigo-300">
@@ -422,15 +418,6 @@ export function WorkoutView() {
                   ? `Prête (IA) · Préparation ${nextSectionLabel}…`
                   : `Préparation prochaine séance ${nextSectionLabel}…`}
               </span>
-            ) : aiError && hasApiKey && !currentAlreadyGenerated ? (
-              <button
-                type="button"
-                onClick={() => void ensureSessionPlansGenerated(section, { force: true })}
-                className="tap inline-flex max-w-xs items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-500/15 dark:text-rose-300"
-              >
-                <span className="truncate">IA : {aiError}</span>
-                <span className="shrink-0 underline">Réessayer</span>
-              </button>
             ) : currentAlreadyGenerated && nextAlreadyGenerated ? (
               <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
                 <Check className="h-3.5 w-3.5" />
@@ -848,15 +835,6 @@ export function WorkoutView() {
             <Sparkles className="h-3.5 w-3.5 animate-pulse" />
             Génération de la prochaine séance {nextSectionLabel}…
           </div>
-        ) : aiError && hasApiKey ? (
-          <button
-            type="button"
-            onClick={() => void ensureSessionPlansGenerated(section, { force: true })}
-            className="tap mt-4 inline-flex items-center gap-1.5 rounded-full border border-rose-500/25 bg-rose-500/10 px-3.5 py-1.5 text-xs font-semibold text-rose-600 dark:text-rose-300"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            Générer la prochaine séance {nextSectionLabel}
-          </button>
         ) : null}
 
         <button

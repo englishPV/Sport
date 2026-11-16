@@ -70,6 +70,22 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     expect(repsCard).toHaveAttribute('data-perf', 'target')
   })
 
+  it('affiche clairement une erreur de quota Gemini dans toute l’application', async () => {
+    const user = userEvent.setup()
+    useWorkoutStore.setState({
+      aiError: 'Quota Gemini épuisé : aucune nouvelle tentative automatique ne sera envoyée.',
+      aiErrorSection: 'legs',
+    })
+    render(<App />)
+
+    expect(screen.getByRole('alert')).toHaveTextContent('La génération de séance a échoué')
+    expect(screen.getByRole('alert')).toHaveTextContent('Quota Gemini épuisé')
+    expect(screen.getByRole('button', { name: 'Réessayer explicitement' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Masquer l’erreur de génération de séance' }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('révèle la valeur de la séance précédente au maintien, sans menu de copie sur mobile', async () => {
     useWorkoutStore.getState().updateSettings({ apiKey: '' })
     const user = userEvent.setup()
@@ -300,6 +316,20 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
 
     await user.click(screen.getByRole('button', { name: 'Durée' }))
     expect(screen.getByText(/Pas encore de temps d'exécution/i)).toBeInTheDocument()
+  })
+
+  it('ne consomme pas d’appel IA en ouvrant les statistiques ; l’analyse est explicite', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.mocked(fetch)
+    render(<App />)
+
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(0))
+    const callsBeforeStats = fetchMock.mock.calls.length
+    await user.click(screen.getByRole('button', { name: 'Statistiques' }))
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeStats)
+    const analyzeButton = screen.getByRole('button', { name: 'Analyser avec l’IA' })
+    await user.click(analyzeButton)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(callsBeforeStats + 1))
   })
 
   it('copie un bilan complet des statistiques prêt à coller dans une IA', async () => {
