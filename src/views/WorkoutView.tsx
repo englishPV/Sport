@@ -245,7 +245,7 @@ export function WorkoutView() {
   const formatSavedMessage = (summary: SaveWorkoutSummary) => {
     const nextTitle = summary.nextRecommended === 'up' ? 'Haut' : 'Jambes'
     return summary.nextAlreadyGenerated
-      ? `Séance enregistrée (${summary.validatedSets} séries) · Prochaine séance ${nextTitle} déjà générée`
+      ? `Séance enregistrée (${summary.validatedSets} séries) · Prochaine séance ${nextTitle} prête (IA)`
       : `Séance enregistrée (${summary.validatedSets} séries)`
   }
 
@@ -421,7 +421,7 @@ export function WorkoutView() {
             ) : currentAlreadyGenerated && nextAlreadyGenerated ? (
               <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
                 <Check className="h-3.5 w-3.5" />
-                Prête (IA) · Prochaine {nextSectionLabel} déjà générée
+                Prête (IA) · {nextSectionLabel} prête aussi
               </span>
             ) : currentAlreadyGenerated ? (
               <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
@@ -431,7 +431,7 @@ export function WorkoutView() {
             ) : nextAlreadyGenerated ? (
               <span className="inline-flex animate-fade-in items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
                 <Check className="h-3.5 w-3.5" />
-                Prochaine séance {nextSectionLabel} déjà générée
+                {nextSectionLabel} déjà prête (IA)
               </span>
             ) : null}
           </div>
@@ -450,7 +450,7 @@ export function WorkoutView() {
           {workoutStarting ? (
             <>
               <Sparkles className="h-5 w-5 animate-pulse" aria-hidden="true" />
-              Préparation de la séance…
+              <span className="animate-preparing">Préparation de la séance…</span>
             </>
           ) : validatedCount > 0 ? (
             `Reprendre (${validatedCount}/${totalSetsCount})`
@@ -825,7 +825,7 @@ export function WorkoutView() {
             className="mt-4 inline-flex animate-pop-in items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3.5 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300"
           >
             <Sparkles className="h-3.5 w-3.5" />
-            Prochaine séance {nextSectionLabel} déjà générée
+            Prochaine séance {nextSectionLabel} prête (IA)
           </div>
         ) : generatingNext ? (
           <div

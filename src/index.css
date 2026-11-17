@@ -86,3 +86,27 @@ html.theme-changing *::after {
     scroll-behavior: auto !important;
   }
 }
+
+/*
+ * Un test de clé ou une pré-génération peut durer plusieurs minutes : l'écran de
+ * préparation reste discret mais bavard, pour éviter de recliquer sur « Commencer ».
+ */
+@keyframes preparing-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+.animate-preparing {
+  animation: preparing-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-preparing {
+    animation: none;
+  }
+}

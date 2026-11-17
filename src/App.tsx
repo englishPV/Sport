@@ -21,6 +21,18 @@ export default function App() {
   const updateSettings = useWorkoutStore((s) => s.updateSettings)
   const simulating = useWorkoutStore((s) => s.simulation !== null)
   const startSimulation = useWorkoutStore((s) => s.startSimulation)
+  const requestSessionPlan = useWorkoutStore((s) => s.requestSessionPlan)
+  const activeSection = useWorkoutStore((s) => s.activeDraft.section)
+  const apiKey = useWorkoutStore((s) => s.settings.apiKey)
+
+  // Au premier lancement, une SEULE séance est demandée à Gemini : celle qui est affichée.
+  // La séance opposée garde son plan calculé sur l'appareil (DDP) jusqu'à ce qu'on l'ouvre.
+  useEffect(() => {
+    if (!apiKey.trim()) return
+    void requestSessionPlan(activeSection)
+    // Volontairement au montage uniquement : les changements de section ont leur propre déclencheur.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     const root = document.documentElement

@@ -72,6 +72,9 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
 
   it('affiche clairement une erreur de quota Gemini dans toute l’application', async () => {
     const user = userEvent.setup()
+    // Plus de clé : le montage de l'application ne déclenche aucune génération qui
+    // pourrait effacer le message d'erreur qu'on teste.
+    useWorkoutStore.getState().clearApiKey()
     useWorkoutStore.setState({
       aiError: 'Quota Gemini épuisé : aucune nouvelle tentative automatique ne sera envoyée.',
       aiErrorSection: 'legs',
@@ -459,10 +462,12 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
     expect(useWorkoutStore.getState().workoutStarting).toBe(false)
     const legsLog = useWorkoutStore.getState().activeDraft.logs['ex-leg-press']
     expect(legsLog.sets.find((set) => !set.isWarmup)?.weight).toBe(140)
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    // Une seule séance est demandée à la fois : la séance affichée. La séance opposée
+    // n'est pas pré-générée au démarrage (elle le sera quand l'utilisateur l'ouvrira).
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('pré-génère Haut (Up) quand on appuie sur Jambes (et génère Jambes si absent), puis confirme en fin de séance que la prochaine séance est déjà générée', async () => {
+  it('ne demande qu’une séance à la fois (jamais les deux d’un coup) et enchaîne les requêtes au rythme des séances ouvertes', async () => {
     const user = userEvent.setup()
 
     // Bloc-notes compact (1 exo Up, 1 exo Jambes) pour parcourir toute la séance jusqu'à l'écran final
@@ -544,20 +549,20 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
 
     render(<App />)
 
-    // Appuie sur Jambes : génère Jambes (car pas encore généré) ET pré-génère Haut (Up) en tâche de fond
+    // Appuie sur Jambes : une seule séance est demandée à l'IA, celle qui est affichée.
     await user.click(screen.getByRole('button', { name: 'Jambes' }))
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
       expect(useWorkoutStore.getState().aiGeneratingSections).toEqual({ up: false, legs: false })
     })
     expect(requestedPrompts[0]).toContain('séance déjà choisie par l\'application : Jambes (Legs)')
-    expect(requestedPrompts[1]).toContain('séance déjà choisie par l\'application : Haut du corps (Up)')
-    expect(screen.getByText(/Prochaine Haut déjà générée/i)).toBeInTheDocument()
+    // La séance opposée n'est pas pré-générée : elle reste sur son calcul local (DDP).
+    expect(useWorkoutStore.getState().coachPlans.up.source).toBe('ddp')
 
-    // Lance et termine la séance Jambes : aucun nouvel appel API car les 2 plans sont déjà prêts !
+    // Lance et termine la séance Jambes : aucun nouvel appel API, le plan est déjà prêt.
     await user.click(screen.getByRole('button', { name: 'Commencer' }))
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
 
     // Les cibles IA de Jambes (140 kg × 9) sont bien appliquées
     expect(
@@ -573,25 +578,20 @@ describe('Écran exercice épuré, code couleur, télémétrie 100% backend et s
 
     await user.click(screen.getByRole('button', { name: 'Valider' }))
 
-    // Écran de fin de séance : l'utilisateur voit clairement que la prochaine séance Haut est déjà générée !
     expect(screen.getByText('Séance terminée')).toBeInTheDocument()
-    expect(screen.getByTestId('next-session-status')).toHaveTextContent(
-      'Prochaine séance Haut déjà générée',
-    )
 
-    // Enregistre la séance : Haut devient la séance du jour, déjà prête sans attente.
-    // Jambes, qui vient d'être faite, est recalculée en arrière-plan avec le nouvel historique.
+    // Enregistre la séance : Haut devient la séance du jour et reçoit SA requête
+    // (l'historique a changé), soit 2 requêtes au total pour toute cette séance.
     await user.click(screen.getByRole('button', { name: 'Enregistrer la séance' }))
     expect(screen.getByRole('heading', { level: 1, name: 'Haut' })).toBeInTheDocument()
-    expect(screen.getByText(/Prochaine séance Haut déjà générée/i)).toBeInTheDocument()
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
     })
-    expect(requestedPrompts[2]).toContain('séance déjà choisie par l\'application : Jambes (Legs)')
+    expect(requestedPrompts[1]).toContain('séance déjà choisie par l\'application : Haut du corps (Up)')
 
-    // Appuyer ensuite sur Haut ne relance rien : les deux plans sont prêts ou déjà en cours.
+    // Appuyer ensuite sur Haut ne relance rien : son plan vient d'être généré.
     await user.click(screen.getByRole('button', { name: 'Haut' }))
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('permet de modifier soi-même son fichier .txt directement dans Bloc-notes et applique les changements', async () => {

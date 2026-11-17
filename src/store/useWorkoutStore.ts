@@ -35,7 +35,13 @@ import {
   resetGeminiClientState,
   sanitizeApiKey,
 } from '../core/gemini'
-import { GeminiError, cancelQueuedGeminiRequests } from '../core/geminiClient'
+import {
+  GeminiError,
+  cancelQueuedGeminiRequests,
+  getGeminiCallLog,
+  testGeminiConnection,
+  type ConnectionTestResult,
+} from '../core/geminiClient'
 import { hasUnrecognizedWorkoutText, parseNotepad } from '../core/parser'
 import { computeSetRestDuration, getOptimalExtraRestSeconds } from '../core/restScience'
 import {
@@ -74,6 +80,18 @@ export interface UndoSnapshot {
 let storeEpoch = 0
 let workoutStartEpoch = 0
 const inFlightCoachBySection: Partial<Record<SectionId, Promise<void>>> = {}
+/**
+ * File de l'application : les générations de séance passent l'une après l'autre,
+ * jamais deux en parallèle. Le client Gemini a bien sa propre file, mais un test de
+ * clé lancé depuis les Réglages la contourne et doublait les requêtes simultanées.
+ */
+let appAiChain: Promise<unknown> = Promise.resolve()
+
+function runSerially<T>(task: () => Promise<T>): Promise<T> {
+  const next = appAiChain.then(task, task)
+  appAiChain = next.catch(() => undefined)
+  return next
+}
 
 /**
  * Anti-spam quota : après un échec (429, surcharge, délai…), les déclencheurs
@@ -86,6 +104,30 @@ const COACH_FAILURE_COOLDOWN_MS = 60_000
 const STATS_FAILURE_COOLDOWN_MS = 60_000
 const coachRetryAt: Partial<Record<SectionId, number>> = {}
 let statsRetryAt = 0
+/**
+ * Quota journalier épuisé : la limite est portée par le PROJET Google, pas par une
+ * section. Plus rien ne part automatiquement (ni l'autre séance, ni les stats)
+ * avant la réinitialisation — sinon chaque écran visité consommait une requête
+ * de plus pour le même refus.
+ */
+let globalAiBlockUntil = 0
+
+function globalAiBlockRemainingMs(): number {
+  return Math.max(0, globalAiBlockUntil - Date.now())
+}
+
+/** « dans 3 h 20 min » : dit quand la limite journalière redeviendra utilisable. */
+function formatRemainingDelay(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000))
+  if (minutes < 60) return `${minutes} min`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest > 0 ? `${hours} h ${rest} min` : `${hours} h`
+}
+
+function quotaBlockMessage(remainingMs: number): string {
+  return `Quota Gemini journalier épuisé : Google refuse encore toute génération pendant ${formatRemainingDelay(remainingMs)}. Le site n’envoie plus rien pour ne pas consommer de requêtes inutiles. Change de clé (ou de projet) dans les Réglages si tu en as une autre.`
+}
 
 function failureCooldownMs(error: unknown, fallbackMs: number): number {
   if (error instanceof GeminiError) {
@@ -93,6 +135,16 @@ function failureCooldownMs(error: unknown, fallbackMs: number): number {
     if (error.kind === 'quota') return 24 * 60 * 60 * 1000
   }
   return fallbackMs
+}
+
+/** Mémorise un échec : délai de la section touchée + disjoncteur global si quota épuisé. */
+function noteAiFailure(section: SectionId | null, error: unknown, fallbackMs: number): void {
+  const delay = failureCooldownMs(error, fallbackMs)
+  if (section) coachRetryAt[section] = Date.now() + delay
+  else statsRetryAt = Date.now() + delay
+  if (error instanceof GeminiError && error.kind === 'quota') {
+    globalAiBlockUntil = Math.max(globalAiBlockUntil, Date.now() + delay)
+  }
 }
 
 function coachCooldownRemainingMs(section: SectionId): number {
@@ -109,6 +161,7 @@ function clearAllAiFailures(): void {
   delete coachRetryAt.up
   delete coachRetryAt.legs
   statsRetryAt = 0
+  globalAiBlockUntil = 0
 }
 
 function clearInFlightCoachTracking(): void {
@@ -492,7 +545,13 @@ export interface WorkoutStoreState {
     primarySection: SectionId,
     options?: { force?: boolean },
   ) => Promise<void>
+  /** Génère au plus UNE séance (la section demandée) : jamais les deux d'un coup. */
+  requestSessionPlan: (section: SectionId, options?: { force?: boolean }) => Promise<void>
   refreshAiStats: (force?: boolean) => Promise<void>
+  /** Connexion Gemini (test de clé) : sérialisée avec les générations. */
+  testConnection: (apiKey: string, options?: { probe?: boolean }) => Promise<ConnectionTestResult>
+  /** Les 10 derniers appels réellement envoyés à Google (compteur des Réglages). */
+  getAiCallLog: () => { tag: string; at: number }[]
   deleteHistoryEntry: (exerciseId: string, entryId: string) => void
   updateHistoryEntry: (exerciseId: string, entryId: string, rawLineText: string) => boolean
   deleteCompletedSession: (sessionId: string) => void
@@ -608,10 +667,10 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           )
         const startEpoch = ++workoutStartEpoch
 
-        // Lance les deux générations sans attendre la suivante. La séance sélectionnée
-        // est prioritaire et doit être prête avant d'afficher le premier exercice.
-        void get().ensureSessionPlansGenerated(section)
         if (shouldWaitForCurrentPlan) {
+          // Une seule requête, celle de la séance affichée. Si le premier lancement
+          // (ou le bouton Jambes/Haut) l'a déjà demandée, askGeminiCoach partage la
+          // requête en cours au lieu d'en ouvrir une seconde.
           set({ workoutStarting: true })
           await get().askGeminiCoach(section, { priority: 'high' })
         }
@@ -1458,22 +1517,53 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
       askGeminiCoach: async (section, options = {}) => {
         const state = get()
         if (!sanitizeApiKey(state.settings.apiKey)) return
+        const stateEpochAtCall = storeEpoch
 
-        const existingPromise = inFlightCoachBySection[section]
-        if (existingPromise) {
-          return existingPromise
-        }
-
-        // Délai anti-spam après échec : les déclencheurs automatiques attendent,
-        // seul un « Réessayer » explicite (force) repart tout de suite.
-        if (!options.force && coachCooldownRemainingMs(section) > 0) return
-
-        const myEpoch = storeEpoch
         const requestFingerprint = buildSectionPlanFingerprint(
           state.exercises,
           section,
           state.preamble,
         )
+
+        const existingPromise = inFlightCoachBySection[section]
+        if (existingPromise) {
+          // Une génération identique est déjà en route : on la partage (zéro requête de plus).
+          if (!options.force) return existingPromise
+          // Un « Réessayer » forcé arrive pendant qu'une tentative est en vol :
+          // on attend qu'elle finisse au lieu d'ouvrir une seconde requête en parallèle.
+          await existingPromise.catch(() => undefined)
+          const after = get()
+          if (
+            storeEpoch === stateEpochAtCall &&
+            buildSectionPlanFingerprint(after.exercises, section, after.preamble) ===
+              requestFingerprint &&
+            isGeminiPlanFresh(after.coachPlans[section], after.exercises, section, after.preamble)
+          ) {
+            return
+          }
+        }
+
+        // Délai anti-spam après échec : les déclencheurs automatiques attendent,
+        // seul un « Réessayer » explicite (force) repart tout de suite.
+        // Quota journalier épuisé : ni une autre section, ni un « Réessayer »
+        // ne peuvent réussir avant la réinitialisation — rien ne part.
+        // Une relance explicite reçoit au moins une explication claire.
+        const globalBlock = globalAiBlockRemainingMs()
+        if (globalBlock > 0) {
+          if (options.force) {
+            set({ aiError: quotaBlockMessage(globalBlock), aiErrorSection: section })
+          }
+          return
+        }
+        if (!options.force && coachCooldownRemainingMs(section) > 0) return
+
+        // Le plan a été rafraîchi entre-temps (démarrage et pré-génération se croisent) :
+        // rien ne part tant que l'historique de cette section ne change pas.
+        if (!options.force && isGeminiPlanFresh(state.coachPlans[section], state.exercises, section, state.preamble)) {
+          return
+        }
+
+        const myEpoch = storeEpoch
 
         const nextGenState = {
           ...state.aiGeneratingSections,
@@ -1488,19 +1578,34 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
 
         const tracked: { promise?: Promise<void> } = {}
         const taskPromise = (async () => {
+          // Une seule génération à la fois, quelle que soit la section : deux requêtes
+          // HIGH en parallèle sur un petit quota RPM, c'est un 429.
           try {
-            const plan = await generateGeminiSessionPlan({
-              section,
-              exercises: state.exercises,
-              preamble: state.preamble,
-              settings: state.settings,
-              priority: options.priority ?? 'normal',
-              // En file derrière une autre génération : si l'historique a changé
-              // d'ici là, la requête ne part pas du tout (zéro quota consommé).
-              isStale: () =>
-                buildSectionPlanFingerprint(get().exercises, section, get().preamble) !==
-                requestFingerprint,
+            const plan = await runSerially(async () => {
+              const latest = get()
+              // Le plan est peut-être arrivé pendant l'attente de son tour : on n'envoie rien.
+              if (
+                storeEpoch === myEpoch &&
+                buildSectionPlanFingerprint(latest.exercises, section, latest.preamble) ===
+                  requestFingerprint &&
+                isGeminiPlanFresh(latest.coachPlans[section], latest.exercises, section, latest.preamble)
+              ) {
+                return null
+              }
+              return generateGeminiSessionPlan({
+                section,
+                exercises: state.exercises,
+                preamble: state.preamble,
+                settings: state.settings,
+                priority: options.priority ?? 'normal',
+                // En file derrière une autre génération : si l'historique a changé
+                // d'ici là, la requête ne part pas du tout (zéro quota consommé).
+                isStale: () =>
+                  buildSectionPlanFingerprint(get().exercises, section, get().preamble) !==
+                  requestFingerprint,
+              })
             })
+            if (!plan) return
 
             if (storeEpoch !== myEpoch) return
 
@@ -1541,7 +1646,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             // Annulée car remplacée par des données plus récentes : pas un échec,
             // pas de délai, pas de message d'erreur.
             if (err instanceof GeminiError && err.kind === 'cancelled') return
-            coachRetryAt[section] = Date.now() + failureCooldownMs(err, COACH_FAILURE_COOLDOWN_MS)
+            noteAiFailure(section, err, COACH_FAILURE_COOLDOWN_MS)
             set({
               aiError: err instanceof Error ? err.message : 'Erreur Gemini.',
               aiErrorSection: section,
@@ -1569,42 +1674,42 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         return taskPromise
       },
 
-      ensureSessionPlansGenerated: async (primarySection, options = {}) => {
+      /**
+       * Vérifie qu'au plus UNE séance est demandée à Gemini : celle qui est affichée.
+       * La séance opposée garde son plan DDP local, calculé sur l'appareil, jusqu'à ce
+       * que l'utilisateur l'ouvre. C'est ce qui ramène le site de 2-3 requêtes par
+       * lancement à une seule.
+       */
+      requestSessionPlan: async (section, options = {}) => {
         const state = get()
         if (!sanitizeApiKey(state.settings.apiKey)) return
-
         const force = options.force === true
-        const nextSection: SectionId = primarySection === 'legs' ? 'up' : 'legs'
-        const tasks: Promise<void>[] = []
-
-        // Si la séance demandée (ex: Jambes) n'était pas déjà générée dans le passé, on la génère d'abord
+        if (!hasSectionHistory(state.exercises, section)) return
         if (
-          hasSectionHistory(state.exercises, primarySection) &&
-          !isGeminiPlanFresh(
-            state.coachPlans[primarySection],
-            state.exercises,
-            primarySection,
-            state.preamble,
-          )
+          !force &&
+          isGeminiPlanFresh(state.coachPlans[section], state.exercises, section, state.preamble)
         ) {
-          tasks.push(get().askGeminiCoach(primarySection, { priority: 'high', force }))
+          return
         }
+        // C'est la séance AFFICHÉE : sa génération est prioritaire dans la file.
+        // Une pré-génération d'arrière-plan (autre section) reste aimable et ne
+        // bloque pas l'ouverture de l'exercice si elle échoue.
+        await get().askGeminiCoach(section, { priority: 'high', force })
+      },
 
-        // Et on pré-génère automatiquement la prochaine séance opposée (ex: Up quand on presse Jambes)
-        // pour qu'elle s'ouvre instantanément et soit déjà prête en fin de séance !
-        if (
-          hasSectionHistory(state.exercises, nextSection) &&
-          !isGeminiPlanFresh(
-            state.coachPlans[nextSection],
-            state.exercises,
-            nextSection,
-            state.preamble,
-          )
-        ) {
-          tasks.push(get().askGeminiCoach(nextSection, { priority: 'normal', force }))
-        }
+      testConnection: (apiKey, options = {}) =>
+        // Même file que les générations : le test de clé ne double jamais une requête en cours.
+        runSerially(() => testGeminiConnection(apiKey, options)),
 
-        await Promise.all(tasks)
+      getAiCallLog: () => getGeminiCallLog(),
+
+      /**
+       * Compatibilité : ne demande jamais les deux séances d'un coup.
+       * La section demandée est générée ; l'autre n'est sollicitée que si elle a été
+       * explicitement demandée par ailleurs (jamais ici).
+       */
+      ensureSessionPlansGenerated: async (primarySection, options = {}) => {
+        await get().requestSessionPlan(primarySection, options)
       },
 
       refreshAiStats: async (force = false) => {
@@ -1619,6 +1724,11 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
         }
         // Délai anti-spam après échec (429, délai dépassé…) : même garde que côté coach,
         // sinon chaque visite de l'onglet relançait une analyse HIGH de plusieurs minutes.
+        const globalBlock = globalAiBlockRemainingMs()
+        if (globalBlock > 0) {
+          if (force) set({ aiStatsError: quotaBlockMessage(globalBlock) })
+          return
+        }
         if (!force && statsRetryAt > Date.now()) return
 
         set({ aiStatsLoading: true, aiStatsError: null })
@@ -1640,7 +1750,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
             set({ aiStatsLoading: false })
             return
           }
-          statsRetryAt = Date.now() + failureCooldownMs(err, STATS_FAILURE_COOLDOWN_MS)
+          noteAiFailure(null, err, STATS_FAILURE_COOLDOWN_MS)
           set({
             aiStatsLoading: false,
             aiStatsError: err instanceof Error ? err.message : 'Analyse IA indisponible.',
@@ -1896,6 +2006,7 @@ export const useWorkoutStore = create<WorkoutStoreState>()(
           patch.geminiModel !== undefined ||
           patch.geminiChannel !== undefined ||
           patch.geminiBaseUrl !== undefined
+        if (touchesAi) clearAllAiFailures()
         set((state) => ({
           settings: { ...state.settings, ...cleanedPatch },
           ...(touchesAi ? { aiStatsError: null, aiError: null } : {}),

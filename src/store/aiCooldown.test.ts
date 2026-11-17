@@ -27,6 +27,13 @@ const quotaExceeded = () => ({
   }),
 })
 
+/** Refus immédiat, jamais réessayé automatiquement : une seule requête consommée. */
+const refused = () => ({
+  ok: false,
+  status: 400,
+  json: async () => ({ error: { code: 400, message: 'Invalid JSON payload received.' } }),
+})
+
 const okPlan = (isUp: boolean) => ({
   ok: true,
   status: 200,
@@ -89,58 +96,91 @@ describe('anti-spam des demandes IA', () => {
     const mock = stubFetch(() => quotaExceeded())
 
     await store().ensureSessionPlansGenerated('up')
-    // Séance du jour + pré-génération de l'autre : deux tentatives, deux échecs.
-    expect(requestCount(mock)).toBe(2)
+    // Une seule séance demandée à la fois : une tentative, un échec, une requête consommée.
+    expect(requestCount(mock)).toBe(1)
     expect(store().aiError).toContain('Quota')
 
     // Clics suivants (changement de section, retour des réglages…) : aucune requête de plus.
     await store().ensureSessionPlansGenerated('up')
     await store().ensureSessionPlansGenerated('legs')
-    expect(requestCount(mock)).toBe(2)
+    expect(requestCount(mock)).toBe(1)
   })
 
   it('garde visible l’échec d’une section même si l’autre séance est générée avec succès', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-01-10T10:00:00Z'))
     await prepareStoreWithKey()
     const mock = stubFetch((prompt) =>
-      prompt.includes('Haut du corps (Up)') ? quotaExceeded() : okPlan(false),
+      prompt.includes('Haut du corps (Up)') ? refused() : okPlan(false),
     )
 
+    // Chaque section est demandée séparément (jamais les deux d'un coup).
     await store().ensureSessionPlansGenerated('up')
+    expect(requestCount(mock)).toBe(1)
+    expect(store().aiError).toContain('Requête refusée')
+    expect(store().aiErrorSection).toBe('up')
 
+    await store().ensureSessionPlansGenerated('legs')
     expect(requestCount(mock)).toBe(2)
     expect(store().coachPlans.legs.source).toBe('gemini')
-    expect(store().aiError).toContain('Quota Gemini')
+    // L'échec de Haut reste affiché, il n'est pas effacé par le succès de Jambes.
+    expect(store().aiError).toContain('Requête refusée')
     expect(store().aiErrorSection).toBe('up')
   })
 
-  it('un « Réessayer » explicite repart tout de suite, sans attendre le délai', async () => {
+  it('un quota journalier épuisé arrête TOUT : l’autre section ne consomme pas une requête de plus', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-01-10T10:00:00Z'))
     await prepareStoreWithKey()
     const mock = stubFetch(() => quotaExceeded())
 
     await store().ensureSessionPlansGenerated('up')
-    expect(requestCount(mock)).toBe(2)
+    expect(requestCount(mock)).toBe(1)
+
+    await store().ensureSessionPlansGenerated('legs')
+    await store().refreshAiStats(true)
+    expect(requestCount(mock)).toBe(1)
+    expect(store().coachPlans.legs.source).toBe('ddp')
+
+    // Une relance explicite ne part pas non plus, mais elle dit pourquoi clairement.
+    await store().ensureSessionPlansGenerated('legs', { force: true })
+    expect(requestCount(mock)).toBe(1)
+    expect(store().aiError).toContain('journalier épuisé')
+    expect(store().aiError).toContain('Change de clé')
+  })
+
+  it('un « Réessayer » explicite repart tout de suite après un échec passager', async () => {
+    await prepareStoreWithKey()
+    const mock = stubFetch(() => refused())
+
+    await store().ensureSessionPlansGenerated('up')
+    expect(requestCount(mock)).toBe(1)
+
+    // Le délai de 60 s empêche les relances automatiques, pas une action explicite.
+    await store().ensureSessionPlansGenerated('up')
+    expect(requestCount(mock)).toBe(1)
 
     await store().ensureSessionPlansGenerated('up', { force: true })
-    expect(requestCount(mock)).toBe(4)
+    expect(requestCount(mock)).toBe(2)
   })
 
   it('une génération réussie lève le délai pour de bon', async () => {
     await prepareStoreWithKey()
     let failing = true
     const mock = stubFetch((prompt) => {
-      if (failing) return quotaExceeded()
+      if (failing) return refused()
       return okPlan(prompt.includes('ex-tirage-vertical'))
     })
 
     await store().ensureSessionPlansGenerated('up')
-    expect(store().aiError).toContain('Quota')
+    expect(store().aiError).toContain('Requête refusée')
 
     failing = false
     await store().ensureSessionPlansGenerated('up', { force: true })
     expect(store().aiError).toBeNull()
     expect(store().coachPlans.up.source).toBe('gemini')
 
-    // Les deux plans sont frais : plus aucune requête n'est nécessaire.
+    // Le plan est frais : plus aucune requête n'est nécessaire.
     const afterSuccess = requestCount(mock)
     await store().ensureSessionPlansGenerated('up')
     expect(requestCount(mock)).toBe(afterSuccess)
